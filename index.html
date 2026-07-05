@@ -1,0 +1,1064 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>LIFE ROAD</title>
+<style>html,body{margin:0;padding:0;background:#0B0C0E;}#root{min-height:100vh;color:#8a8a8a;font-family:system-ui,sans-serif;padding:16px;box-sizing:border-box;}</style>
+<script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/prop-types@15.8.1/prop-types.min.js" crossorigin></script>
+<script src="https://unpkg.com/recharts@2.12.7/umd/Recharts.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone@7.25.9/babel.min.js" crossorigin></script>
+</head>
+<body>
+<div id="root">불러오는 중…</div>
+<script>
+/* 데이터는 이 브라우저에만 저장됩니다(localStorage). 외부로 전송하지 않습니다. */
+window.storage = {
+  get: function(k){ return new Promise(function(res,rej){ var v=localStorage.getItem(k); if(v==null) rej(new Error('nf')); else res({key:k,value:v}); }); },
+  set: function(k,v){ localStorage.setItem(k,v); return Promise.resolve({key:k}); },
+  delete: function(k){ localStorage.removeItem(k); return Promise.resolve({key:k,deleted:true}); },
+  list: function(){ return Promise.resolve({keys:Object.keys(localStorage)}); }
+};
+</script>
+<script type="text/plain" id="appsrc">
+const { useState, useEffect, useMemo, useRef } = React;
+const { PieChart, Pie, Cell, ResponsiveContainer, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, BarChart, Bar, ReferenceLine } = Recharts;
+
+/* ----------------------------- design tokens ----------------------------- */
+const T = {
+  bg: "#0B0C0E", bg2: "#141619", elev: "#1B1F24", line: "#272B31",
+  text: "#F2EEE6", white: "#FFFFFF", dim: "#938E82",
+  mint: "#7CE0D3", taupe: "#C9BEAA", cream: "#FBF1E6",
+  mintDim: "#A8E6DC", taupeDim: "#8A8170", loss: "#E8806B",
+};
+const CAT_COLORS = {
+  "투자자산": "#7CE0D3", "현금성": "#A8E6DC", "부동산": "#C9BEAA",
+  "연금·보험": "#8A8170", "실물·기타": "#5E6B66",
+};
+const SHADES = {
+  "투자자산": ["#7CE0D3", "#5FC9BC", "#A8E6DC", "#49A89C", "#8AD9CD", "#6FB5AB"],
+  "현금성": ["#A8E6DC", "#7FC9BF", "#C2EDE6"],
+  "부동산": ["#C9BEAA", "#B3A78F"],
+  "연금·보험": ["#8A8170", "#A39A87"],
+  "실물·기타": ["#5E6B66", "#788883", "#46514D"],
+};
+// 종목 → 자산군 분류 (가중치 합 1). 미지정 종목은 '기타'.
+const CLASS_MAP = {
+  "S&P500": [["S&P500", 1]],
+  "VOO": [["S&P500", 1]],
+  "TLT": [["미국장기채", 1]],
+  "미국 국채": [["미국단기채", 1]],
+  "S&P500 & 10 BOND": [["S&P500", 0.5], ["미국장기채", 0.5]],
+  "BANK": [["원화현금", 1]],
+  "MMF": [["원화현금", 1]],
+};
+const CLASS_ORDER = ["S&P500", "미국장기채", "미국단기채", "원화현금", "기타"];
+
+// 자동 시세 가능한 해외 ETF만 (Stooq 무료 데이터). 종목명 → Stooq 심볼.
+const TICKER_MAP = { "TLT": "tlt.us", "VOO": "voo.us" };
+const PROXIES = [
+  (u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
+  (u) => `https://corsproxy.io/?url=${encodeURIComponent(u)}`,
+];
+async function fetchStooq(symbol) {
+  const src = `https://stooq.com/q/l/?s=${symbol}&f=sd2t2ohlcv&h&e=csv`;
+  for (const p of PROXIES) {
+    try {
+      const res = await fetch(p(src));
+      if (!res.ok) continue;
+      const text = await res.text();
+      const lines = text.trim().split("\n");
+      if (lines.length < 2) continue;
+      const close = parseFloat(lines[1].split(",")[6]);
+      if (!isNaN(close) && close > 0) return close;
+    } catch (e) { /* try next proxy */ }
+  }
+  return null;
+}
+
+/* ------------------------------- helpers --------------------------------- */
+function won(n) {
+  if (n === null || n === undefined || n === "" || isNaN(n)) return "—";
+  let v = Math.round(Number(n));
+  const neg = v < 0; v = Math.abs(v);
+  const eok = Math.floor(v / 1e8), man = Math.floor((v % 1e8) / 1e4), rest = v % 1e4;
+  const p = [];
+  if (eok > 0) p.push(eok.toLocaleString() + "억");
+  if (man > 0) p.push(man.toLocaleString() + "만");
+  if (eok === 0 && man === 0) p.push(rest.toLocaleString());
+  return (neg ? "-" : "") + p.join(" ") + "원";
+}
+const signWon = (n) => (Number(n) > 0 ? "+" : "") + won(n);
+const priceFmt = (v, cur) => (cur === "USD" ? "$" + Number(v || 0).toLocaleString(undefined, { maximumFractionDigits: 2 }) : "₩" + Math.round(num(v)).toLocaleString());
+const eokTick = (v) => (v / 1e8).toFixed(1).replace(/\.0$/, "") + "억";
+const pct = (v) => (v == null || isNaN(v) ? "—" : (v > 0 ? "+" : "") + Number(v).toFixed(1) + "%");
+const num = (v) => (v === "" || v == null ? 0 : Number(v));
+const uid = () => Math.random().toString(36).slice(2, 9);
+const today = () => new Date().toISOString().slice(0, 10);
+
+/* ------------------------------ position math ----------------------------- */
+// 이동평균법 — 거래내역에서 종목별 보유수량·평균단가·실현손익·배당 계산
+function computePositions(txns, pricesByName, fx) {
+  const sorted = [...txns].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  const g = {};
+  for (const t of sorted) {
+    const key = t.accountId + "||" + t.name;
+    if (!g[key]) g[key] = { accountId: t.accountId, name: t.name, currency: t.currency || "KRW", shares: 0, avgCost: 0, realized: 0, dividends: 0, invested: 0 };
+    const p = g[key]; p.currency = t.currency || p.currency;
+    const qty = num(t.shares), price = num(t.price), fee = num(t.fee);
+    if (t.type === "buy") {
+      const add = qty * price + fee;
+      p.avgCost = (p.avgCost * p.shares + add) / ((p.shares + qty) || 1);
+      p.shares += qty; p.invested += add;
+    } else if (t.type === "sell") {
+      const proceeds = qty * price - fee;
+      p.realized += proceeds - p.avgCost * qty;
+      p.shares = Math.max(0, p.shares - qty);
+    } else if (t.type === "dividend") {
+      p.dividends += price - fee;
+    }
+  }
+  return Object.values(g).map((p) => {
+    const cp = num(pricesByName[p.name]);
+    const mv = p.shares * cp;
+    const unreal = (cp - p.avgCost) * p.shares;
+    const conv = p.currency === "USD" ? fx : 1;
+    return { ...p, currentPrice: cp, marketValue: mv, unrealized: unreal,
+      mvKRW: mv * conv, unrealizedKRW: unreal * conv, realizedKRW: p.realized * conv,
+      dividendsKRW: p.dividends * conv, investedKRW: p.invested * conv, conv };
+  });
+}
+
+// XIRR (금액가중수익률) — 현금흐름 + 현재 평가액으로 연환산 수익률 계산
+function xirr(flows) {
+  const cf = [...flows].filter((f) => f.amount).sort((a, b) => a.date - b.date);
+  if (cf.length < 2) return null;
+  const t0 = cf[0].date.getTime();
+  const yrs = (d) => (d.getTime() - t0) / (365 * 24 * 3600 * 1000);
+  const npv = (r) => cf.reduce((s, f) => s + f.amount / Math.pow(1 + r, yrs(f.date)), 0);
+  let lo = -0.9999, hi = 10, fLo = npv(lo), fHi = npv(hi);
+  if (isNaN(fLo) || isNaN(fHi) || fLo * fHi > 0) return null;
+  for (let i = 0; i < 200; i++) {
+    const mid = (lo + hi) / 2, f = npv(mid);
+    if (Math.abs(f) < 1) return mid;
+    if (fLo * f < 0) { hi = mid; fHi = f; } else { lo = mid; fLo = f; }
+  }
+  return (lo + hi) / 2;
+}
+
+/* --------------------------- seed (example) data -------------------------- */
+// 2026-06-30 기준 — 업로드한 '자산_2025_데이터.xlsx' 반영. 7/1부터는 거래내역으로 누적.
+const OPEN = "2026-06-30";
+const SEED = {
+  profile: { name: "이진원", birthYear: 1979, retireAge: 65, fx: 1544, openingRealized: 108260000, priceServer: "https://liferoad-price-server.onrender.com", backupKey: "" },
+  assets: [
+    { id: "a1", name: "집", category: "부동산", value: 1700000000 },
+    { id: "a2", name: "통장(KB)", category: "현금성", value: 700000 },
+    { id: "a3", name: "통장(토스)", category: "현금성", value: 2000000 },
+    { id: "a4", name: "청약저축", category: "현금성", value: 26800000 },
+    { id: "a5", name: "우리사주", category: "실물·기타", value: 170807360 },
+    { id: "a6", name: "보람 채권", category: "실물·기타", value: 30000000 },
+  ],
+  accounts: [
+    { id: "ac1", name: "퇴직연금", broker: "한국투자" },
+    { id: "ac2", name: "개인연금", broker: "미래에셋" },
+    { id: "ac3", name: "개인연금", broker: "삼성" },
+    { id: "ac4", name: "IRP", broker: "" },
+    { id: "ac5", name: "주식 위탁", broker: "토스증권" },
+  ],
+  prices: { "S&P500": 26115, "S&P500 & 10 BOND": 12215, "BANK": 5478934, "TLT": 134665, "VOO": 1052212, "MMF": 104744, "미국 국채": 62400 },
+  transactions: [
+    { id: "t1", date: OPEN, accountId: "ac1", name: "S&P500", type: "buy", shares: 18086, price: 20633, fee: 0, currency: "KRW" },
+    { id: "t2", date: OPEN, accountId: "ac1", name: "S&P500 & 10 BOND", type: "buy", shares: 15186, price: 10895, fee: 0, currency: "KRW" },
+    { id: "t3", date: OPEN, accountId: "ac1", name: "BANK", type: "buy", shares: 1, price: 5000000, fee: 0, currency: "KRW" },
+    { id: "t4", date: OPEN, accountId: "ac2", name: "S&P500", type: "buy", shares: 4543, price: 20265, fee: 0, currency: "KRW" },
+    { id: "t5", date: OPEN, accountId: "ac3", name: "S&P500", type: "buy", shares: 357, price: 20075, fee: 0, currency: "KRW" },
+    { id: "t6", date: OPEN, accountId: "ac4", name: "S&P500", type: "buy", shares: 923, price: 20326, fee: 0, currency: "KRW" },
+    { id: "t7", date: OPEN, accountId: "ac4", name: "S&P500 & 10 BOND", type: "buy", shares: 809, price: 10863, fee: 0, currency: "KRW" },
+    { id: "t8a", date: OPEN, accountId: "ac5", name: "TLT", type: "buy", shares: 238, price: 30370338 / 238, fee: 0, currency: "KRW" },
+    { id: "t8b", date: OPEN, accountId: "ac5", name: "VOO", type: "buy", shares: 40, price: 39679989 / 40, fee: 0, currency: "KRW" },
+    { id: "t8c", date: OPEN, accountId: "ac5", name: "MMF", type: "buy", shares: 398, price: 41688290 / 398, fee: 0, currency: "KRW" },
+    { id: "t8d", date: OPEN, accountId: "ac5", name: "미국 국채", type: "buy", shares: 1, price: 62400, fee: 0, currency: "USD" },
+  ],
+  debts: [
+    { id: "d1", name: "주택담보대출1(KB)", category: "주담대", balance: 148684441, rate: 0, monthly: 0, maturity: "" },
+    { id: "d2", name: "주택담보대출2(KB)", category: "주담대", balance: 294390560, rate: 0, monthly: 0, maturity: "" },
+    { id: "d3", name: "주택담보대출(하나)", category: "주담대", balance: 106923772, rate: 0, monthly: 0, maturity: "" },
+    { id: "d4", name: "회사대출", category: "기타", balance: 180000000, rate: 0, monthly: 0, maturity: "" },
+    { id: "d5", name: "학자금대출", category: "기타", balance: 5000000, rate: 0, monthly: 0, maturity: "" },
+    { id: "d6", name: "신용대출(KB)", category: "신용", balance: 100000000, rate: 0, monthly: 0, maturity: "" },
+    { id: "d7", name: "신용대출(KB)", category: "신용", balance: 126000000, rate: 0, monthly: 0, maturity: "" },
+  ],
+  yearly: [
+    { id: "y1", year: 2023, netWorth: 1400000000, target: null, returnPct: 17.2, returnAmt: 50651786 },
+    { id: "y2", year: 2024, netWorth: 1559738369, target: null, returnPct: 11.5, returnAmt: 40529262 },
+    { id: "y3", year: 2025, netWorth: 1716521246, target: null, returnPct: 14.5, returnAmt: 67050516 },
+    { id: "y4", year: 2026, netWorth: 2003549981, target: null, returnPct: 17.5, returnAmt: 104875396 },
+  ],
+  quarterly: [
+    { id: "q01", year: 2022, q: 1, returnPct: -9.2, returnAmt: -21200000 },
+    { id: "q02", year: 2022, q: 2, returnPct: 5.9, returnAmt: 14320338 },
+    { id: "q03", year: 2022, q: 3, returnPct: -6.3, returnAmt: -16120338 },
+    { id: "q04", year: 2022, q: 4, returnPct: -4.6, returnAmt: -13110335 },
+    { id: "q05", year: 2023, q: 1, returnPct: 6.8, returnAmt: 22206212 },
+    { id: "q06", year: 2023, q: 2, returnPct: 4.4, returnAmt: 14331923 },
+    { id: "q07", year: 2023, q: 3, returnPct: -1.3, returnAmt: -4012048 },
+    { id: "q08", year: 2023, q: 4, returnPct: 6.1, returnAmt: 18125699 },
+    { id: "q09", year: 2024, q: 1, returnPct: 3.5, returnAmt: 11945968 },
+    { id: "q10", year: 2024, q: 2, returnPct: 2.0, returnAmt: 6910026 },
+    { id: "q11", year: 2024, q: 3, returnPct: 2.0, returnAmt: 7014090 },
+    { id: "q12", year: 2024, q: 4, returnPct: 4.2, returnAmt: 14659178 },
+    { id: "q13", year: 2025, q: 1, returnPct: -2.0, returnAmt: -8958488 },
+    { id: "q14", year: 2025, q: 2, returnPct: 0.5, returnAmt: 2492525 },
+    { id: "q15", year: 2025, q: 3, returnPct: 9.0, returnAmt: 41606480 },
+    { id: "q16", year: 2025, q: 4, returnPct: 6.9, returnAmt: 31909999 },
+    { id: "q17", year: 2026, q: 1, returnPct: -0.8, returnAmt: -5020454 },
+    { id: "q18", year: 2026, q: 2, returnPct: 18.4, returnAmt: 109895850 },
+  ],
+  snapshots: [
+    { id: "sp0", date: "2026-06-30", value: 1037413856, netWorth: 2003549981 }, // 기초 (2026.6.30)
+  ],
+};
+
+function normalize(d) {
+  const out = { ...SEED, ...d };
+  out.profile = { ...SEED.profile, ...(d.profile || {}) };
+  out.assets = d.assets || SEED.assets;
+  out.debts = d.debts || SEED.debts;
+  out.yearly = (d.yearly || SEED.yearly).map((y) => ({ returnAmt: null, ...y }));
+  out.quarterly = d.quarterly || SEED.quarterly;
+  out.snapshots = d.snapshots || SEED.snapshots;
+  // migrate old holdings-based accounts -> transactions
+  if (d.accounts && d.accounts[0] && d.accounts[0].holdings) {
+    const accts = [], txns = [], prices = {};
+    d.accounts.forEach((a) => {
+      accts.push({ id: a.id, name: a.name, broker: a.broker || "" });
+      (a.holdings || []).forEach((h) => {
+        txns.push({ id: uid(), date: "2024-01-01", accountId: a.id, name: h.name, type: "buy", shares: num(h.shares), price: num(h.avgCost), fee: 0, currency: h.currency || "KRW" });
+        prices[h.name] = num(h.currentPrice);
+      });
+    });
+    out.accounts = accts; out.transactions = txns; out.prices = prices;
+  } else {
+    out.accounts = d.accounts || SEED.accounts;
+    out.transactions = d.transactions || SEED.transactions;
+    out.prices = d.prices || SEED.prices;
+  }
+  delete out.investments;
+  out.transactions = (out.transactions || []).map((t) => ({ ...t, opening: t.opening !== undefined ? t.opening : (t.date === OPEN) }));
+  return out;
+}
+
+/* ------------------------------ small UI bits ----------------------------- */
+function Card({ title, sub, children, accent, right }) {
+  return (
+    <div className="lr-card">
+      {(title || right) && (
+        <div className="lr-card-head">
+          <div>
+            {title && <div className="lr-card-title" style={accent ? { color: accent } : null}>{title}</div>}
+            {sub && <div className="lr-card-sub">{sub}</div>}
+          </div>
+          {right}
+        </div>
+      )}
+      {children}
+    </div>
+  );
+}
+function NumInput({ value, onChange, hint, width = 130, align = "right", step }) {
+  return (
+    <span className="lr-numwrap" style={{ width }}>
+      <input className="lr-input" type="number" step={step} value={value ?? ""} style={{ textAlign: align }}
+        onChange={(e) => onChange(e.target.value === "" ? "" : Number(e.target.value))} />
+      {hint && value !== "" && value != null && <span className="lr-hint">{won(value)}</span>}
+    </span>
+  );
+}
+function TextInput({ value, onChange, width = 150 }) {
+  return <input className="lr-input" style={{ width }} value={value ?? ""} onChange={(e) => onChange(e.target.value)} />;
+}
+function DateInput({ value, onChange, width = 140 }) {
+  return <input className="lr-input" type="date" style={{ width }} value={value ?? ""} onChange={(e) => onChange(e.target.value)} />;
+}
+function Kpi({ label, value, color, sub, subColor }) {
+  return (
+    <div className="lr-kpi">
+      <div className="lr-kpi-label">{label}</div>
+      <div className="lr-kpi-val" style={{ color }}>{value}</div>
+      {sub && <div className="lr-kpi-sub" style={subColor ? { color: subColor } : null}>{sub}</div>}
+    </div>
+  );
+}
+function Stat({ label, value, color }) {
+  return (
+    <div className="lr-stat">
+      <div className="lr-stat-label">{label}</div>
+      <div className="lr-stat-val" style={color ? { color } : null}>{value}</div>
+    </div>
+  );
+}
+
+/* -------------------------------- app ------------------------------------- */
+function LifeRoad() {
+  const [data, setData] = useState(() => normalize(SEED));
+  const [loaded, setLoaded] = useState(false);
+  const [tab, setTab] = useState("dashboard");
+  const [retView, setRetView] = useState("year");
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshMsg, setRefreshMsg] = useState("");
+  const [snapMsg, setSnapMsg] = useState("");
+  const [backupMsg, setBackupMsg] = useState("");
+  const backupTimer = useRef(null);
+
+  useEffect(() => {
+    (async () => {
+      if (window.storage) {
+        for (const k of ["liferoad_v10"]) {
+          try { const r = await window.storage.get(k); if (r && r.value) { setData(normalize(JSON.parse(r.value))); break; } } catch (e) {}
+        }
+      }
+      setLoaded(true);
+    })();
+  }, []);
+  useEffect(() => {
+    if (!loaded) return;
+    (async () => { try { if (window.storage) await window.storage.set("liferoad_v10", JSON.stringify(data)); } catch (e) {} })();
+  }, [data, loaded]);
+
+  // 웹 자동 백업: 데이터가 바뀌면 4초 후 시세 서버(/backup)로 전송 → GitHub 저장
+  useEffect(() => {
+    if (!loaded) return;
+    const server = (data.profile.priceServer || "").trim().replace(/\/+$/, "");
+    const key = (data.profile.backupKey || "").trim();
+    if (!server || !key) return;
+    clearTimeout(backupTimer.current);
+    backupTimer.current = setTimeout(async () => {
+      try {
+        const res = await fetch(`${server}/backup?key=${encodeURIComponent(key)}`, {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data),
+        });
+        setBackupMsg(res.ok ? "자동 백업됨 " + new Date().toLocaleTimeString("ko-KR") : "백업 실패 (" + res.status + ")");
+      } catch (e) { setBackupMsg("백업 실패 — 네트워크"); }
+    }, 4000);
+    return () => clearTimeout(backupTimer.current);
+  }, [data, loaded]);
+
+  const set = (patch) => setData((d) => ({ ...d, ...patch }));
+  const fx = num(data.profile.fx) || 1;
+  const curYear = new Date().getFullYear();
+  const age = curYear - num(data.profile.birthYear);
+  const accName = (id) => { const a = data.accounts.find((x) => x.id === id); return a ? a.name : "—"; };
+
+  /* ---- positions from ledger ---- */
+  const positions = useMemo(() => computePositions(data.transactions, data.prices, fx), [data.transactions, data.prices, fx]);
+  const investCurrent = positions.reduce((s, p) => s + p.mvKRW, 0);
+  const unrealTotal = positions.reduce((s, p) => s + p.unrealizedKRW, 0);
+  const realizedLedger = positions.reduce((s, p) => s + p.realizedKRW, 0);
+  const openingRealized = num(data.profile.openingRealized);
+  const realizedTotal = realizedLedger + openingRealized;
+  const dividendTotal = positions.reduce((s, p) => s + p.dividendsKRW, 0);
+  const investedTotal = positions.reduce((s, p) => s + p.investedKRW, 0);
+  const costBasis = positions.reduce((s, p) => s + p.avgCost * p.shares * p.conv, 0);
+  const unrealReturn = costBasis ? (unrealTotal / costBasis) * 100 : 0;
+  const cumPL = unrealTotal + realizedTotal + dividendTotal;
+  const cumReturn = investedTotal ? (cumPL / investedTotal) * 100 : 0;
+
+  const xirrRate = useMemo(() => {
+    const flows = [];
+    data.transactions.forEach((t) => {
+      const conv = (t.currency === "USD" ? fx : 1);
+      const d = new Date(t.date); if (isNaN(d)) return;
+      const qty = num(t.shares), price = num(t.price), fee = num(t.fee);
+      if (t.type === "buy") flows.push({ date: d, amount: -(qty * price + fee) * conv });
+      else if (t.type === "sell") flows.push({ date: d, amount: (qty * price - fee) * conv });
+      else if (t.type === "dividend") flows.push({ date: d, amount: (price - fee) * conv });
+    });
+    if (investCurrent > 0) flows.push({ date: new Date(), amount: investCurrent });
+    const r = xirr(flows);
+    return r == null ? null : r * 100;
+  }, [data.transactions, fx, investCurrent]);
+
+  const otherAssets = useMemo(() => data.assets.reduce((s, a) => s + num(a.value), 0), [data.assets]);
+  const totalAssets = otherAssets + investCurrent;
+  const totalDebt = useMemo(() => data.debts.reduce((s, d) => s + num(d.balance), 0), [data.debts]);
+  const netWorth = totalAssets - totalDebt;
+  const debtRatio = totalAssets ? (totalDebt / totalAssets) * 100 : 0;
+
+  const allocation = useMemo(() => {
+    const m = {};
+    data.assets.forEach((a) => { m[a.category] = (m[a.category] || 0) + num(a.value); });
+    m["투자자산"] = (m["투자자산"] || 0) + investCurrent;
+    return Object.entries(m).filter(([, v]) => v > 0).map(([name, value]) => ({ name, value }));
+  }, [data.assets, investCurrent]);
+
+  const invByClass = useMemo(() => {
+    const m = {};
+    positions.forEach((p) => {
+      const rules = CLASS_MAP[p.name] || [["기타", 1]];
+      rules.forEach(([cls, w]) => { m[cls] = (m[cls] || 0) + p.mvKRW * w; });
+    });
+    return Object.entries(m).filter(([, v]) => v > 0)
+      .sort((a, b) => CLASS_ORDER.indexOf(a[0]) - CLASS_ORDER.indexOf(b[0]))
+      .map(([name, value]) => ({ name, value }));
+  }, [positions]);
+
+  const donutDetail = useMemo(() => {
+    const out = [];
+    allocation.forEach((c) => {
+      const items = c.name === "투자자산"
+        ? invByClass
+        : data.assets.filter((a) => a.category === c.name && num(a.value) > 0).map((a) => ({ name: a.name, value: num(a.value) }));
+      const pal = SHADES[c.name] || ["#5E6B66"];
+      items.forEach((it, i) => out.push({ ...it, cat: c.name, color: pal[i % pal.length] }));
+    });
+    return out;
+  }, [allocation, invByClass, data.assets]);
+
+  const pathData = useMemo(() =>
+    [...data.yearly].sort((a, b) => a.year - b.year).map((y) => ({
+      age: y.year - num(data.profile.birthYear), year: y.year,
+      실적: y.year === curYear ? netWorth : (y.netWorth == null || y.netWorth === "" ? null : num(y.netWorth)),
+      목표: y.target == null || y.target === "" ? null : num(y.target),
+    })), [data.yearly, data.profile.birthYear, curYear, netWorth]);
+
+  const retYear = useMemo(() => [...data.yearly].filter((y) => y.returnPct != null && y.returnPct !== "")
+    .sort((a, b) => a.year - b.year).map((y) => ({ label: String(y.year), full: y.year + "년", r: num(y.returnPct), amt: num(y.returnAmt) })), [data.yearly]);
+  const retQuarter = useMemo(() => [...data.quarterly].filter((q) => q.returnPct != null && q.returnPct !== "")
+    .sort((a, b) => a.year - b.year || a.q - b.q).map((q) => ({ label: String(q.year).slice(2) + " Q" + q.q, full: q.year + "년 " + q.q + "분기", r: num(q.returnPct), amt: num(q.returnAmt) })), [data.quarterly]);
+  const retSeries = retView === "year" ? retYear : retQuarter;
+  const retTotal = retSeries.reduce((s, x) => s + x.amt, 0);
+
+  const retireYear = num(data.profile.birthYear) + num(data.profile.retireAge);
+  const goal = [...data.yearly].sort((a, b) => b.year - a.year).find((y) => num(y.target) > 0);
+  const stockNames = useMemo(() => [...new Set(data.transactions.map((t) => t.name).filter(Boolean))], [data.transactions]);
+  const curOf = (nm) => { const t = data.transactions.find((x) => x.name === nm); return t ? t.currency : "KRW"; };
+
+  /* ---- mutators ---- */
+  const upd = (key, id, field, val) => set({ [key]: data[key].map((r) => (r.id === id ? { ...r, [field]: val } : r)) });
+  const del = (key, id) => set({ [key]: data[key].filter((r) => r.id !== id) });
+  const addAsset = () => set({ assets: [...data.assets, { id: uid(), name: "새 자산", category: "현금성", value: 0 }] });
+  const addDebt = () => set({ debts: [...data.debts, { id: uid(), name: "새 부채", category: "신용", balance: 0, rate: 0, monthly: 0, maturity: "" }] });
+  const addYear = () => set({ yearly: [...data.yearly, { id: uid(), year: new Date().getFullYear(), netWorth: 0, target: 0, returnPct: 0, returnAmt: 0 }] });
+  const addQuarter = () => set({ quarterly: [...data.quarterly, { id: uid(), year: new Date().getFullYear(), q: 1, returnPct: 0, returnAmt: 0 }] });
+  const saveSnapshot = () => {
+    const D = today();
+    const value = Math.round(investCurrent);
+    const sorted = [...data.snapshots].sort((a, b) => (a.date < b.date ? 1 : -1));
+    const prev = sorted.find((s) => s.date < D) || sorted[0] || null;
+    const startValue = prev ? prev.value : value;
+    const startDate = prev ? prev.date : "0000-00-00";
+    let netFlow = 0; // 기간 중 순입금 = 매수 − 매도 (기초잔고 제외)
+    data.transactions.forEach((t) => {
+      if (t.opening) return;
+      if (t.date > startDate && t.date <= D) {
+        const conv = t.currency === "USD" ? fx : 1;
+        if (t.type === "buy") netFlow += (num(t.shares) * num(t.price) + num(t.fee)) * conv;
+        else if (t.type === "sell") netFlow -= (num(t.shares) * num(t.price) - num(t.fee)) * conv;
+      }
+    });
+    const gain = value - startValue - netFlow;
+    const rp = startValue ? Math.round((gain / startValue) * 1000) / 10 : 0;
+    const Y = Number(D.slice(0, 4));
+    const Q = Math.floor((Number(D.slice(5, 7)) - 1) / 3) + 1;
+    const quarterly = [...data.quarterly];
+    const qi = quarterly.findIndex((x) => Number(x.year) === Y && Number(x.q) === Q);
+    if (qi >= 0) quarterly[qi] = { ...quarterly[qi], returnPct: rp, returnAmt: Math.round(gain) };
+    else quarterly.push({ id: uid(), year: Y, q: Q, returnPct: rp, returnAmt: Math.round(gain) });
+    const yq = quarterly.filter((x) => Number(x.year) === Y);
+    const yGain = yq.reduce((s, x) => s + num(x.returnAmt), 0);
+    const yPct = Math.round(yq.reduce((s, x) => s + num(x.returnPct), 0) * 10) / 10;
+    const yearly = [...data.yearly];
+    const yi = yearly.findIndex((x) => Number(x.year) === Y);
+    const nw = Math.round(netWorth);
+    if (yi >= 0) yearly[yi] = { ...yearly[yi], netWorth: nw, returnPct: yPct, returnAmt: Math.round(yGain) };
+    else yearly.push({ id: uid(), year: Y, netWorth: nw, target: null, returnPct: yPct, returnAmt: Math.round(yGain) });
+    const snapshots = [...data.snapshots.filter((s) => s.date !== D), { id: uid(), date: D, value, netWorth: nw }];
+    setData((d) => ({ ...d, quarterly, yearly, snapshots }));
+    setSnapMsg(`${Y}년 ${Q}분기 기록 — 손익 ${signWon(gain)} (${pct(rp)}) · 순자산 ${won(nw)} 저장됨`);
+  };
+  const delSnapshot = (id) => set({ snapshots: data.snapshots.filter((s) => s.id !== id) });
+  const addAccount = () => set({ accounts: [...data.accounts, { id: uid(), name: "새 계좌", broker: "" }] });
+  const addTxn = () => set({ transactions: [...data.transactions, { id: uid(), date: today(), accountId: data.accounts[0]?.id || "", name: "", type: "buy", shares: 0, price: 0, fee: 0, currency: "KRW", opening: false }] });
+  const setPrice = (nm, val) => set({ prices: { ...data.prices, [nm]: val } });
+  const refreshPrices = async () => {
+    setRefreshing(true); setRefreshMsg("시세 불러오는 중…");
+    try {
+      const server = (data.profile.priceServer || "").trim().replace(/\/+$/, "");
+      if (server) {
+        const res = await fetch(`${server}/quotes`);
+        if (!res.ok) throw new Error("server " + res.status);
+        const j = await res.json();
+        const updates = {};
+        Object.entries(j.quotes || {}).forEach(([nm, px]) => { if (stockNames.includes(nm) && px > 0) updates[nm] = Math.round(px); });
+        if (Object.keys(updates).length) {
+          setData((d) => ({ ...d, profile: { ...d.profile, fx: j.fx ? Math.round(j.fx) : d.profile.fx }, prices: { ...d.prices, ...updates } }));
+          setRefreshMsg(`갱신 완료 (내 서버): ${Object.keys(updates).join(", ")}${j.fx ? ` · 환율 ${Math.round(j.fx).toLocaleString()}원` : ""} (${new Date().toLocaleTimeString("ko-KR")})`);
+        } else {
+          setRefreshMsg("서버는 응답했지만 해당 종목 시세가 없습니다 — server.js 의 종목 매핑을 확인하세요.");
+        }
+      } else {
+        let fxRate = num(data.profile.fx) || 1;
+        const fxQ = await fetchStooq("usdkrw"); if (fxQ) fxRate = fxQ;
+        const updates = {}; const done = [];
+        for (const [name, sym] of Object.entries(TICKER_MAP)) {
+          if (!stockNames.includes(name)) continue;
+          const q = await fetchStooq(sym);
+          if (q) { updates[name] = Math.round(curOf(name) === "USD" ? q : q * fxRate); done.push(name); }
+        }
+        if (done.length) {
+          setData((d) => ({ ...d, profile: { ...d.profile, fx: Math.round(fxRate) }, prices: { ...d.prices, ...updates } }));
+          setRefreshMsg(`갱신 완료 (공개데이터): ${done.join(", ")} · 환율 ${Math.round(fxRate).toLocaleString()}원 (${new Date().toLocaleTimeString("ko-KR")})`);
+        } else {
+          setRefreshMsg("시세를 가져오지 못했습니다 — 수동 입력을 이용하세요.");
+        }
+      }
+    } catch (e) {
+      setRefreshMsg("시세 연결 실패 — 서버 주소/네트워크를 확인하거나 수동 입력하세요.");
+    }
+    setRefreshing(false);
+  };
+  const cloudBackupNow = async () => {
+    const server = (data.profile.priceServer || "").trim().replace(/\/+$/, "");
+    const key = (data.profile.backupKey || "").trim();
+    if (!server || !key) { setBackupMsg("시세 서버 URL과 백업 키를 먼저 입력하세요."); return; }
+    setBackupMsg("백업 중…");
+    try {
+      const res = await fetch(`${server}/backup?key=${encodeURIComponent(key)}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) });
+      const j = await res.json().catch(() => ({}));
+      setBackupMsg(res.ok ? "백업 완료 " + new Date().toLocaleTimeString("ko-KR") : "백업 실패: " + (j.error || res.status));
+    } catch (e) { setBackupMsg("백업 실패 — 네트워크"); }
+  };
+  const cloudRestore = async () => {
+    const server = (data.profile.priceServer || "").trim().replace(/\/+$/, "");
+    const key = (data.profile.backupKey || "").trim();
+    if (!server || !key) { setBackupMsg("시세 서버 URL과 백업 키를 먼저 입력하세요."); return; }
+    if (!confirm("클라우드 백업으로 현재 데이터를 덮어쓸까요? 이 기기의 현재 내용은 사라집니다.")) return;
+    setBackupMsg("복원 중…");
+    try {
+      const res = await fetch(`${server}/backup?key=${encodeURIComponent(key)}`);
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) { setBackupMsg("복원 실패: " + (j.error || res.status)); return; }
+      if (j && j.data) { setData(normalize(j.data)); setBackupMsg("복원 완료 " + new Date().toLocaleTimeString("ko-KR")); }
+      else setBackupMsg("클라우드에 저장된 백업이 없습니다.");
+    } catch (e) { setBackupMsg("복원 실패 — 네트워크"); }
+  };
+
+  if (!loaded) return <div style={{ padding: 40, color: T.dim, background: T.bg, fontFamily: "system-ui" }}>불러오는 중…</div>;
+
+  return (
+    <div className="lr-root">
+      <style>{CSS}</style>
+
+      <header className="lr-header">
+        <div>
+          <div className="lr-brand">LIFE&nbsp;ROAD</div>
+          <div className="lr-brand-sub">{data.profile.name || "나"}의 인생 자산관리 · 만 {age}세</div>
+        </div>
+        <div className="lr-headline">
+          <div className="lr-headline-label">순자산</div>
+          <div className="lr-headline-val">{won(netWorth)}</div>
+        </div>
+      </header>
+
+      <nav className="lr-tabs">
+        {[["dashboard", "대시보드"], ["assets", "자산"], ["invest", "투자·거래내역"], ["debt", "부채"], ["history", "수익 기록"], ["settings", "설정"]]
+          .map(([k, label]) => <button key={k} className={"lr-tab" + (tab === k ? " on" : "")} onClick={() => setTab(k)}>{label}</button>)}
+      </nav>
+
+      {/* ============================ DASHBOARD ============================ */}
+      {tab === "dashboard" && (
+        <div className="lr-grid">
+          <div className="lr-kpis">
+            <Kpi label="총자산" value={won(totalAssets)} color={T.text} />
+            <Kpi label="총부채" value={won(totalDebt)} color={T.loss} sub={`부채비율 ${debtRatio.toFixed(0)}%`} />
+            <Kpi label="투자 평가액" value={won(investCurrent)} color={T.mint} sub={`누적손익 ${signWon(cumPL)}`} subColor={cumPL >= 0 ? T.mint : T.loss} />
+            <Kpi label="순자산" value={won(netWorth)} color={T.cream} />
+          </div>
+
+          <Card title="나이별 자산 경로" sub="연도별 순자산 추이 · 올해는 현재 자산현황에서 자동 반영" accent={T.cream}>
+            <ResponsiveContainer width="100%" height={300}>
+              <AreaChart data={pathData} margin={{ top: 8, right: 12, left: 4, bottom: 0 }}>
+                <defs>
+                  <linearGradient id="gAct" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={T.mint} stopOpacity={0.32} /><stop offset="100%" stopColor={T.mint} stopOpacity={0.03} /></linearGradient>
+                </defs>
+                <CartesianGrid stroke={T.line} vertical={false} />
+                <XAxis dataKey="age" tickFormatter={(a) => a + "세"} stroke={T.dim} fontSize={12} tickLine={false} />
+                <YAxis tickFormatter={eokTick} stroke={T.dim} fontSize={12} tickLine={false} width={46} />
+                <Tooltip formatter={(v, n) => [won(v), n]} labelFormatter={(a) => `만 ${a}세`} contentStyle={tip} />
+                <ReferenceLine x={age} stroke={T.dim} strokeDasharray="3 3" label={{ value: "현재", fontSize: 11, fill: T.dim, position: "top" }} />
+                <Area type="monotone" dataKey="실적" stroke={T.mint} strokeWidth={2.5} fill="url(#gAct)" connectNulls dot={{ r: 3, fill: T.mint }} />
+              </AreaChart>
+            </ResponsiveContainer>
+          </Card>
+
+          <div className="lr-row2">
+            <Card title="현재 자산현황" sub="자산 배분 · 투자자산은 자산군별 세분화" accent={T.cream}>
+              <div className="lr-alloc">
+                <ResponsiveContainer width="48%" height={240}>
+                  <PieChart>
+                    <Pie data={allocation} dataKey="value" nameKey="name" innerRadius={38} outerRadius={56} paddingAngle={1} stroke="none">
+                      {allocation.map((a) => <Cell key={a.name} fill={CAT_COLORS[a.name] || "#5E6B66"} />)}
+                    </Pie>
+                    <Pie data={donutDetail} dataKey="value" nameKey="name" innerRadius={60} outerRadius={92} paddingAngle={1} stroke="none">
+                      {donutDetail.map((d, i) => <Cell key={i} fill={d.color} />)}
+                    </Pie>
+                    <Tooltip formatter={(v, n) => [won(v), n]} contentStyle={tip} />
+                  </PieChart>
+                </ResponsiveContainer>
+                <ul className="lr-legend">
+                  {allocation.map((a, ai) => (
+                    <React.Fragment key={a.name}>
+                      <li><span className="dot" style={{ background: CAT_COLORS[a.name] || "#5E6B66" }} />
+                        <span className="nm">{a.name}</span><span className="vl">{won(a.value)}</span>
+                        <span className="pc">{totalAssets ? ((a.value / totalAssets) * 100).toFixed(0) : 0}%</span></li>
+                      {a.name === "투자자산" && invByClass.map((acc, i) => (
+                        <li key={acc.name} className="leaf"><span className="dot" style={{ background: SHADES["투자자산"][i % SHADES["투자자산"].length] }} />
+                          <span className="nm">{acc.name}</span><span className="vl">{won(acc.value)}</span>
+                          <span className="pc">{totalAssets ? ((acc.value / totalAssets) * 100).toFixed(0) : 0}%</span></li>
+                      ))}
+                    </React.Fragment>
+                  ))}
+                </ul>
+              </div>
+            </Card>
+
+            <Card title="투자 수익률" sub="기록 기반 · 수익률 + 손익금액" accent={T.mint}
+              right={<div className="lr-seg"><button className={retView === "year" ? "on" : ""} onClick={() => setRetView("year")}>연도</button><button className={retView === "quarter" ? "on" : ""} onClick={() => setRetView("quarter")}>분기</button></div>}>
+              <div className="lr-ret-total"><span>{retView === "year" ? "연도" : "분기"} 누적 손익</span><b style={{ color: retTotal >= 0 ? T.mint : T.loss }}>{signWon(retTotal)}</b></div>
+              <ResponsiveContainer width="100%" height={172}>
+                <BarChart data={retSeries} margin={{ top: 16, right: 8, left: 0, bottom: 0 }}>
+                  <CartesianGrid stroke={T.line} vertical={false} />
+                  <XAxis dataKey="label" stroke={T.dim} fontSize={11} tickLine={false} interval={retSeries.length > 12 ? Math.ceil(retSeries.length / 9) : 0} />
+                  <YAxis tickFormatter={(v) => v + "%"} stroke={T.dim} fontSize={11} tickLine={false} width={34} />
+                  <Tooltip content={<RetTip />} cursor={{ fill: "rgba(124,224,211,.06)" }} />
+                  <ReferenceLine y={0} stroke={T.dim} />
+                  <Bar dataKey="r" radius={[3, 3, 0, 0]} maxBarSize={46}>
+                    {retSeries.map((d, i) => <Cell key={i} fill={d.r >= 0 ? T.mint : T.loss} />)}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </Card>
+          </div>
+
+          {/* ledger-derived performance summary */}
+          <Card title="투자 성과 요약" sub="거래내역에서 자동 계산 (이동평균법)" accent={T.mint}>
+            <div className="lr-stats">
+              <Stat label="평가액" value={won(investCurrent)} color={T.text} />
+              <Stat label="평가손익 (미실현)" value={signWon(unrealTotal)} color={unrealTotal >= 0 ? T.mint : T.loss} />
+              <Stat label="실현손익" value={signWon(realizedTotal)} color={realizedTotal >= 0 ? T.mint : T.loss} />
+              <Stat label="배당 (세후)" value={signWon(dividendTotal)} color={T.taupe} />
+              <Stat label="누적손익" value={signWon(cumPL)} color={cumPL >= 0 ? T.mint : T.loss} />
+              <Stat label="연환산 수익률 (XIRR)" value={xirrRate == null ? "—" : pct(xirrRate)} color={xirrRate >= 0 ? T.mint : T.loss} />
+            </div>
+            <div className="lr-mini">실현손익에는 2026.6.30까지의 기존 실현손익 <b>{won(openingRealized)}</b>이 포함됩니다 (설정에서 수정). 단순 누적수익률 {pct(cumReturn)} · XIRR는 7/1 이후 거래가 쌓이면 자동 산출됩니다.</div>
+          </Card>
+
+          {/* live holdings grouped by account */}
+          <Card title="실시간 투자 현황" sub="계좌별 · 현재가는 '투자·거래내역' 탭에서 입력" accent={T.mint}>
+            <div className="lr-scrollx">
+              <table className="lr-table">
+                <thead><tr><th>종목</th><th className="r">보유</th><th className="r">평균단가</th><th className="r">현재가</th><th className="r">평가액</th><th className="r">평가손익</th><th className="r">실현손익</th><th className="r">수익률</th></tr></thead>
+                <tbody>
+                  {data.accounts.map((acc) => {
+                    const ps = positions.filter((p) => p.accountId === acc.id);
+                    if (!ps.length) return null;
+                    const mv = ps.reduce((s, p) => s + p.mvKRW, 0);
+                    const ur = ps.reduce((s, p) => s + p.unrealizedKRW, 0);
+                    const rl = ps.reduce((s, p) => s + p.realizedKRW, 0);
+                    const basis = ps.reduce((s, p) => s + p.avgCost * p.shares * p.conv, 0);
+                    const r = basis ? (ur / basis) * 100 : null;
+                    return (
+                      <React.Fragment key={acc.id}>
+                        <tr className="grp"><td colSpan={8}>{acc.name}{acc.broker ? ` · ${acc.broker}` : ""}</td></tr>
+                        {ps.map((p) => {
+                          const r2 = p.avgCost && p.shares ? ((p.currentPrice - p.avgCost) / p.avgCost) * 100 : null;
+                          const closed = p.shares <= 0;
+                          return (
+                            <tr key={p.name} className={closed ? "closed" : ""}>
+                              <td className="ind">{p.name}{closed ? " (청산)" : ""}</td>
+                              <td className="r mono">{closed ? "—" : p.shares.toLocaleString()}</td>
+                              <td className="r mono">{closed ? "—" : priceFmt(p.avgCost, p.currency)}</td>
+                              <td className="r mono">{closed ? "—" : priceFmt(p.currentPrice, p.currency)}</td>
+                              <td className="r mono">{closed ? "—" : won(p.mvKRW)}</td>
+                              <td className="r mono" style={{ color: p.unrealizedKRW >= 0 ? T.mint : T.loss }}>{closed ? "—" : signWon(p.unrealizedKRW)}</td>
+                              <td className="r mono" style={{ color: p.realizedKRW >= 0 ? T.mint : T.loss }}>{p.realized ? signWon(p.realizedKRW) : "—"}</td>
+                              <td className="r mono" style={{ color: (r2 || 0) >= 0 ? T.mint : T.loss }}>{r2 == null ? "—" : pct(r2)}</td>
+                            </tr>
+                          );
+                        })}
+                        <tr className="sub">
+                          <td>계좌 소계</td><td></td><td></td><td></td>
+                          <td className="r mono">{won(mv)}</td>
+                          <td className="r mono" style={{ color: ur >= 0 ? T.mint : T.loss }}>{signWon(ur)}</td>
+                          <td className="r mono" style={{ color: rl >= 0 ? T.mint : T.loss }}>{signWon(rl)}</td>
+                          <td className="r mono" style={{ color: (r || 0) >= 0 ? T.mint : T.loss }}>{r == null ? "—" : pct(r)}</td>
+                        </tr>
+                      </React.Fragment>
+                    );
+                  })}
+                  {openingRealized !== 0 && (
+                    <tr className="sub">
+                      <td>기존 실현손익 (~2026.6.30)</td><td></td><td></td><td></td><td className="r mono">—</td><td className="r mono">—</td>
+                      <td className="r mono" style={{ color: openingRealized >= 0 ? T.mint : T.loss }}>{signWon(openingRealized)}</td><td className="r mono">—</td>
+                    </tr>
+                  )}
+                  <tr className="sum">
+                    <td>전체 합계</td><td></td><td></td><td></td>
+                    <td className="r mono">{won(investCurrent)}</td>
+                    <td className="r mono" style={{ color: unrealTotal >= 0 ? T.mint : T.loss }}>{signWon(unrealTotal)}</td>
+                    <td className="r mono" style={{ color: realizedTotal >= 0 ? T.mint : T.loss }}>{signWon(realizedTotal)}</td>
+                    <td className="r mono" style={{ color: unrealReturn >= 0 ? T.mint : T.loss }}>{pct(unrealReturn)}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </Card>
+
+          <Card title="부채 현황" sub={`총 ${won(totalDebt)} · 부채비율 ${debtRatio.toFixed(0)}%`} accent={T.loss}>
+            <table className="lr-table">
+              <thead><tr><th>항목</th><th>분류</th><th className="r">잔액</th><th className="r">금리</th><th className="r">월 상환</th><th className="r">만기</th></tr></thead>
+              <tbody>{data.debts.map((d) => (
+                <tr key={d.id}><td>{d.name}</td><td className="muted">{d.category}</td><td className="r mono">{won(d.balance)}</td>
+                  <td className="r mono">{num(d.rate).toFixed(1)}%</td><td className="r mono">{won(d.monthly)}</td><td className="r muted">{d.maturity || "—"}</td></tr>
+              ))}</tbody>
+            </table>
+          </Card>
+        </div>
+      )}
+
+      {/* ============================== ASSETS ============================== */}
+      {tab === "assets" && (
+        <div className="lr-grid">
+          <Card title="자산 입력" sub="투자자산은 '투자·거래내역' 탭에서 관리됩니다 (이중계상 방지)">
+            <table className="lr-table edit">
+              <thead><tr><th>항목명</th><th>분류</th><th className="r">평가액 (원)</th><th></th></tr></thead>
+              <tbody>{data.assets.map((a) => (
+                <tr key={a.id}><td><TextInput value={a.name} onChange={(v) => upd("assets", a.id, "name", v)} /></td>
+                  <td><select className="lr-input" value={a.category} onChange={(e) => upd("assets", a.id, "category", e.target.value)}>{["현금성", "부동산", "연금·보험", "실물·기타"].map((c) => <option key={c}>{c}</option>)}</select></td>
+                  <td className="r"><NumInput value={a.value} onChange={(v) => upd("assets", a.id, "value", v)} hint /></td>
+                  <td className="r"><button className="lr-x" onClick={() => del("assets", a.id)}>×</button></td></tr>
+              ))}</tbody>
+            </table>
+            <button className="lr-add" onClick={addAsset}>+ 자산 추가</button>
+          </Card>
+        </div>
+      )}
+
+      {/* ========================= INVEST / LEDGER ========================= */}
+      {tab === "invest" && (
+        <div className="lr-grid">
+          <Card title="거래내역" sub="매수·매도·배당만 기록하면 평균단가·실현손익·평가손익이 자동 계산됩니다">
+            <div className="lr-scrollx">
+              <table className="lr-table edit">
+                <thead><tr><th>날짜</th><th>계좌</th><th>종목</th><th>구분</th><th className="r">수량</th><th className="r">단가/금액</th><th className="r">수수료/세금</th><th>통화</th><th></th></tr></thead>
+                <tbody>
+                  {[...data.transactions].sort((a, b) => (a.date < b.date ? 1 : -1)).map((t) => (
+                    <tr key={t.id} className={t.opening ? "txn-open" : ""}>
+                      <td><DateInput value={t.date} onChange={(v) => upd("transactions", t.id, "date", v)} width={134} /></td>
+                      <td><select className="lr-input" value={t.accountId} onChange={(e) => upd("transactions", t.id, "accountId", e.target.value)}>{data.accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}</select></td>
+                      <td><TextInput value={t.name} onChange={(v) => upd("transactions", t.id, "name", v)} width={120} /></td>
+                      <td><select className="lr-input" value={t.type} onChange={(e) => upd("transactions", t.id, "type", e.target.value)}>
+                        <option value="buy">매수</option><option value="sell">매도</option><option value="dividend">배당</option></select>{t.opening && <span className="lr-badge">기초잔고</span>}</td>
+                      <td className="r"><NumInput value={t.shares} onChange={(v) => upd("transactions", t.id, "shares", v)} width={80} /></td>
+                      <td className="r"><NumInput value={t.price} onChange={(v) => upd("transactions", t.id, "price", v)} width={100} /></td>
+                      <td className="r"><NumInput value={t.fee} onChange={(v) => upd("transactions", t.id, "fee", v)} width={90} /></td>
+                      <td><select className="lr-input" value={t.currency} onChange={(e) => upd("transactions", t.id, "currency", e.target.value)} style={{ width: 66 }}><option>KRW</option><option>USD</option></select></td>
+                      <td className="r"><button className="lr-x" onClick={() => del("transactions", t.id)}>×</button></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="lr-mini"><b>기초잔고</b>는 2026.6.30 시작 보유분입니다 (7/1부터 실제 거래를 추가하세요). 배당은 수량 없이 <b>금액</b>칸에 배당 총액, <b>수수료/세금</b>칸에 원천징수세를 넣으세요.</div>
+            <button className="lr-add" onClick={addTxn}>+ 거래 추가</button>
+          </Card>
+
+          <Card title="현재가 입력" sub="해외 ETF(TLT·VOO)는 자동 · 국내 펀드는 수동 입력"
+            right={<button className="lr-btn sm" onClick={refreshPrices} disabled={refreshing}>{refreshing ? "불러오는 중…" : "↻ 시세 새로고침"}</button>}>
+            <table className="lr-table edit">
+              <thead><tr><th>종목</th><th>통화</th><th></th><th className="r">현재가</th></tr></thead>
+              <tbody>{stockNames.map((nm) => (
+                <tr key={nm}><td>{nm}</td><td className="muted">{curOf(nm)}</td>
+                  <td>{TICKER_MAP[nm] && <span className="lr-badge">자동</span>}</td>
+                  <td className="r"><NumInput value={data.prices[nm]} onChange={(v) => setPrice(nm, v)} width={120} /></td></tr>
+              ))}</tbody>
+            </table>
+            {refreshMsg && <div className="lr-mini">{refreshMsg}</div>}
+            <div className="lr-mini">설정 탭에 <b>시세 서버 URL</b>을 입력하면 매핑된 모든 종목(국내 ETF 포함)을 자동 갱신합니다. 비워두면 해외 ETF만 공개 데이터로 가져옵니다. 실패 시 현재가를 직접 입력하세요.</div>
+          </Card>
+
+          <Card title="계좌 관리">
+            <table className="lr-table edit">
+              <thead><tr><th>계좌명</th><th>증권사</th><th></th></tr></thead>
+              <tbody>{data.accounts.map((a) => (
+                <tr key={a.id}><td><TextInput value={a.name} onChange={(v) => upd("accounts", a.id, "name", v)} width={170} /></td>
+                  <td><TextInput value={a.broker} onChange={(v) => upd("accounts", a.id, "broker", v)} width={140} /></td>
+                  <td className="r"><button className="lr-x" onClick={() => { if (confirm("계좌를 삭제하면 연결된 거래는 남습니다. 삭제할까요?")) del("accounts", a.id); }}>×</button></td></tr>
+              ))}</tbody>
+            </table>
+            <button className="lr-add" onClick={addAccount}>+ 계좌 추가</button>
+          </Card>
+        </div>
+      )}
+
+      {/* =============================== DEBT =============================== */}
+      {tab === "debt" && (
+        <div className="lr-grid">
+          <Card title="부채 입력">
+            <div className="lr-scrollx">
+              <table className="lr-table edit">
+                <thead><tr><th>항목명</th><th>분류</th><th className="r">잔액 (원)</th><th className="r">금리%</th><th className="r">월 상환 (원)</th><th>만기 YYYY-MM</th><th></th></tr></thead>
+                <tbody>{data.debts.map((d) => (
+                  <tr key={d.id}><td><TextInput value={d.name} onChange={(v) => upd("debts", d.id, "name", v)} width={130} /></td>
+                    <td><select className="lr-input" value={d.category} onChange={(e) => upd("debts", d.id, "category", e.target.value)}>{["주담대", "신용", "할부", "마이너스통장", "기타"].map((c) => <option key={c}>{c}</option>)}</select></td>
+                    <td className="r"><NumInput value={d.balance} onChange={(v) => upd("debts", d.id, "balance", v)} hint /></td>
+                    <td className="r"><NumInput value={d.rate} onChange={(v) => upd("debts", d.id, "rate", v)} width={70} step="0.1" /></td>
+                    <td className="r"><NumInput value={d.monthly} onChange={(v) => upd("debts", d.id, "monthly", v)} /></td>
+                    <td><TextInput value={d.maturity} onChange={(v) => upd("debts", d.id, "maturity", v)} width={100} /></td>
+                    <td className="r"><button className="lr-x" onClick={() => del("debts", d.id)}>×</button></td></tr>
+                ))}</tbody>
+              </table>
+            </div>
+            <button className="lr-add" onClick={addDebt}>+ 부채 추가</button>
+          </Card>
+        </div>
+      )}
+
+      {/* ============================== HISTORY ============================ */}
+      {tab === "history" && (
+        <div className="lr-grid">
+          <Card title="스냅샷 저장" sub="분기말·연말에 누르면 투자 손익과 순자산이 함께 기록되어, 분기·연도 손익과 나이별 자산 경로가 자동으로 쌓입니다" accent={T.mint}
+            right={<button className="lr-btn sm" onClick={saveSnapshot}>+ 현재 스냅샷 저장</button>}>
+            {snapMsg && <div className="lr-mini" style={{ marginTop: 0, marginBottom: 10, color: T.mint }}>{snapMsg}</div>}
+            <table className="lr-table">
+              <thead><tr><th>날짜</th><th className="r">투자 평가액</th><th className="r">순자산</th><th></th></tr></thead>
+              <tbody>{[...data.snapshots].sort((a, b) => (a.date < b.date ? 1 : -1)).map((s) => (
+                <tr key={s.id}><td className="mono">{s.date}{s.date === "2026-06-30" ? " (기초)" : ""}</td>
+                  <td className="r mono">{won(s.value)}</td>
+                  <td className="r mono">{s.netWorth != null ? won(s.netWorth) : "—"}</td>
+                  <td className="r"><button className="lr-x" onClick={() => delSnapshot(s.id)}>×</button></td></tr>
+              ))}</tbody>
+            </table>
+            <div className="lr-mini">지금 누르면 오늘({today()}) 날짜로 저장됩니다. 순입금(매수−매도)은 자동으로 빼서 순수 시장 손익만 기록합니다. 나이별 경로는 올해 값은 실시간, 지나간 해는 스냅샷으로 확정됩니다.</div>
+          </Card>
+
+          <Card title="연도 기록" sub="순자산 경로 + 연도별 투자 수익률·손익 · 미래 행은 순자산을 비우면 목표선만 표시">
+            <div className="lr-scrollx">
+              <table className="lr-table edit">
+                <thead><tr><th className="r">연도</th><th className="r">나이</th><th className="r">순자산(실적)</th><th className="r">수익률%</th><th className="r">손익금액</th><th></th></tr></thead>
+                <tbody>{[...data.yearly].sort((a, b) => a.year - b.year).map((y) => (
+                  <tr key={y.id}><td className="r"><NumInput value={y.year} onChange={(v) => upd("yearly", y.id, "year", v)} width={68} /></td>
+                    <td className="r muted">{num(y.year) - num(data.profile.birthYear)}세</td>
+                    <td className="r">{y.year === curYear
+                      ? <span style={{ display: "inline-flex", flexDirection: "column", alignItems: "flex-end" }}><b style={{ fontVariantNumeric: "tabular-nums" }}>{won(netWorth)}</b><small style={{ fontSize: "10px", color: T.dim }}>현재 자산현황 자동</small></span>
+                      : <NumInput value={y.netWorth} onChange={(v) => upd("yearly", y.id, "netWorth", v)} hint />}</td>
+                    <td className="r"><NumInput value={y.returnPct} onChange={(v) => upd("yearly", y.id, "returnPct", v)} width={70} step="0.1" /></td>
+                    <td className="r"><NumInput value={y.returnAmt} onChange={(v) => upd("yearly", y.id, "returnAmt", v)} hint /></td>
+                    <td className="r"><button className="lr-x" onClick={() => del("yearly", y.id)}>×</button></td></tr>
+                ))}</tbody>
+              </table>
+            </div>
+            <button className="lr-add" onClick={addYear}>+ 연도 추가</button>
+          </Card>
+
+          <Card title="분기 기록" sub="분기별 투자 수익률·손익 (현재 분기 포함)" accent={T.mint}>
+            <table className="lr-table edit">
+              <thead><tr><th className="r">연도</th><th className="r">분기</th><th className="r">수익률%</th><th className="r">손익금액</th><th></th></tr></thead>
+              <tbody>{[...data.quarterly].sort((a, b) => a.year - b.year || a.q - b.q).map((q) => (
+                <tr key={q.id}><td className="r"><NumInput value={q.year} onChange={(v) => upd("quarterly", q.id, "year", v)} width={68} /></td>
+                  <td className="r"><select className="lr-input" value={q.q} onChange={(e) => upd("quarterly", q.id, "q", Number(e.target.value))} style={{ width: 60 }}>{[1, 2, 3, 4].map((n) => <option key={n} value={n}>{n}Q</option>)}</select></td>
+                  <td className="r"><NumInput value={q.returnPct} onChange={(v) => upd("quarterly", q.id, "returnPct", v)} width={70} step="0.1" /></td>
+                  <td className="r"><NumInput value={q.returnAmt} onChange={(v) => upd("quarterly", q.id, "returnAmt", v)} hint /></td>
+                  <td className="r"><button className="lr-x" onClick={() => del("quarterly", q.id)}>×</button></td></tr>
+              ))}</tbody>
+            </table>
+            <button className="lr-add" onClick={addQuarter}>+ 분기 추가</button>
+          </Card>
+        </div>
+      )}
+
+      {/* ============================== SETTINGS =========================== */}
+      {tab === "settings" && (
+        <div className="lr-grid">
+          <Card title="기본 정보">
+            <div className="lr-form">
+              <label>이름<TextInput value={data.profile.name} onChange={(v) => set({ profile: { ...data.profile, name: v } })} width={180} /></label>
+              <label>출생연도<NumInput value={data.profile.birthYear} onChange={(v) => set({ profile: { ...data.profile, birthYear: v } })} width={100} /></label>
+              <label>목표 은퇴 나이<NumInput value={data.profile.retireAge} onChange={(v) => set({ profile: { ...data.profile, retireAge: v } })} width={80} /></label>
+              <label>환율 USD/KRW<NumInput value={data.profile.fx} onChange={(v) => set({ profile: { ...data.profile, fx: v } })} width={100} /></label>
+              <label>기초 실현손익 (~2026.6.30, 원)<NumInput value={data.profile.openingRealized} onChange={(v) => set({ profile: { ...data.profile, openingRealized: v } })} width={160} hint /></label>
+              <label style={{ gridColumn: "1 / -1" }}>시세 서버 URL (자동 시세)<TextInput value={data.profile.priceServer} onChange={(v) => set({ profile: { ...data.profile, priceServer: v } })} width={340} /></label>
+            </div>
+            <div className="lr-backup">
+              <div className="lr-backup-title">웹 자동 백업 (내 시세 서버 → 비공개 GitHub)</div>
+              <div className="lr-backup-desc">백업 키를 입력하면 데이터가 바뀔 때마다 자동으로 서버에 백업됩니다. 서버 환경변수에 설정한 <b>BACKUP_KEY</b> 와 같은 값을 넣으세요. (서버 설정법은 price-server의 README 참고)</div>
+              <label style={{ display: "block", marginTop: 10, fontSize: 13, color: "var(--dim)", fontWeight: 600 }}>백업 키<br /><TextInput value={data.profile.backupKey} onChange={(v) => set({ profile: { ...data.profile, backupKey: v } })} width={280} /></label>
+              <div className="lr-backup-btns">
+                <button className="lr-btn" onClick={cloudBackupNow}>지금 백업</button>
+                <button className="lr-btn" onClick={cloudRestore}>클라우드에서 복원</button>
+              </div>
+              {backupMsg && <div className="lr-mini" style={{ marginTop: 8 }}>{backupMsg}</div>}
+            </div>
+            <div className="lr-note">입력 데이터는 이 기기에 자동 저장됩니다. 기기를 바꾸실 때는 위 백업 기능을 이용하세요.
+              <button className="lr-reset" onClick={() => { if (confirm("모든 데이터를 예시값으로 초기화할까요?")) setData(normalize(SEED)); }}>예시값으로 초기화</button></div>
+          </Card>
+        </div>
+      )}
+
+      <footer className="lr-foot">LIFE ROAD · 개인 자산관리 프로토타입 v3 (거래내역 기반) · 데이터는 외부로 전송되지 않습니다</footer>
+    </div>
+  );
+}
+
+function RetTip({ active, payload }) {
+  if (!active || !payload || !payload.length) return null;
+  const d = payload[0].payload;
+  return (
+    <div style={{ background: T.bg2, border: `1px solid ${T.line}`, borderRadius: 8, padding: "8px 11px", fontSize: 12, color: T.text }}>
+      <div style={{ color: T.dim, marginBottom: 3 }}>{d.full}</div>
+      <div>수익률 <b style={{ color: d.r >= 0 ? T.mint : T.loss }}>{pct(d.r)}</b></div>
+      <div>손익 <b style={{ color: d.amt >= 0 ? T.mint : T.loss }}>{signWon(d.amt)}</b></div>
+    </div>
+  );
+}
+
+const tip = { background: T.bg2, border: `1px solid ${T.line}`, borderRadius: 8, fontSize: 12, color: T.text };
+
+const CSS = `
+.lr-root{--bg:${T.bg};--bg2:${T.bg2};--line:${T.line};--text:${T.text};--dim:${T.dim};--mint:${T.mint};--taupe:${T.taupe};--cream:${T.cream};
+font-family:'Pretendard',-apple-system,'Apple SD Gothic Neo','Malgun Gothic',sans-serif;color:var(--text);background:var(--bg);min-height:100%;padding:20px;box-sizing:border-box;}
+.lr-root *{box-sizing:border-box;}
+.lr-header{display:flex;justify-content:space-between;align-items:flex-end;padding:4px 4px 18px;border-bottom:1px solid var(--line);}
+.lr-brand{font-weight:800;letter-spacing:.24em;font-size:20px;color:var(--cream);}
+.lr-brand-sub{font-size:13px;color:var(--dim);margin-top:4px;}
+.lr-headline{text-align:right;}
+.lr-headline-label{font-size:11px;letter-spacing:.12em;color:var(--dim);text-transform:uppercase;}
+.lr-headline-val{font-size:28px;font-weight:800;color:var(--mint);font-variant-numeric:tabular-nums;line-height:1.1;}
+.lr-headline-goal{font-size:12px;color:var(--taupe);margin-top:2px;}
+.lr-tabs{display:flex;gap:4px;margin:16px 0;flex-wrap:wrap;}
+.lr-tab{border:1px solid var(--line);background:var(--bg2);color:var(--dim);padding:8px 16px;border-radius:999px;font-size:13px;font-weight:600;cursor:pointer;transition:.15s;}
+.lr-tab:hover{border-color:var(--mint);color:var(--mint);}
+.lr-tab.on{background:var(--mint);color:#0B0C0E;border-color:var(--mint);}
+.lr-grid{display:flex;flex-direction:column;gap:16px;}
+.lr-kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;}
+.lr-kpi{background:var(--bg2);border:1px solid var(--line);border-radius:12px;padding:16px 18px;}
+.lr-kpi-label{font-size:12px;color:var(--dim);}
+.lr-kpi-val{font-size:21px;font-weight:800;margin-top:6px;font-variant-numeric:tabular-nums;}
+.lr-kpi-sub{font-size:12px;color:var(--dim);margin-top:3px;}
+.lr-card{background:var(--bg2);border:1px solid var(--line);border-radius:14px;padding:18px 20px;}
+.lr-card-head{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px;gap:12px;}
+.lr-card-title{font-size:15px;font-weight:700;}
+.lr-card-sub{font-size:12px;color:var(--dim);margin-top:2px;}
+.lr-row2{display:grid;grid-template-columns:1fr 1fr;gap:16px;}
+.lr-alloc{display:flex;align-items:center;gap:8px;}
+.lr-legend{list-style:none;margin:0;padding:0;flex:1;}
+.lr-legend li{display:flex;align-items:center;gap:8px;font-size:13px;padding:5px 0;border-bottom:1px solid var(--line);}
+.lr-legend li.leaf{padding-left:14px;font-size:12px;opacity:.92;border-bottom:1px solid transparent;}
+.lr-legend li.leaf .nm{color:var(--dim);width:auto;flex:1;}
+.lr-legend .dot{width:9px;height:9px;border-radius:2px;flex:none;}
+.lr-legend .nm{flex:none;width:72px;}
+.lr-legend .vl{flex:1;text-align:right;font-variant-numeric:tabular-nums;font-size:12px;}
+.lr-legend .pc{width:40px;text-align:right;color:var(--dim);font-size:12px;}
+.lr-seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;}
+.lr-seg button{border:none;background:transparent;color:var(--dim);padding:5px 13px;font-size:12px;font-weight:600;cursor:pointer;}
+.lr-seg button.on{background:var(--mint);color:#0B0C0E;}
+.lr-ret-total{display:flex;justify-content:space-between;align-items:baseline;font-size:12px;color:var(--dim);margin-bottom:4px;}
+.lr-ret-total b{font-size:16px;font-variant-numeric:tabular-nums;}
+.lr-stats{display:grid;grid-template-columns:repeat(6,1fr);gap:10px;}
+.lr-stat{background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:13px 14px;}
+.lr-stat-label{font-size:11.5px;color:var(--dim);}
+.lr-stat-val{font-size:17px;font-weight:800;margin-top:5px;font-variant-numeric:tabular-nums;}
+.lr-table tr.txn-open td{background:rgba(201,190,170,.05);}
+.lr-badge{display:inline-block;margin-left:6px;padding:1px 6px;border-radius:5px;font-size:10px;font-weight:600;color:var(--taupe);border:1px solid var(--taupe);white-space:nowrap;}
+.lr-mini{font-size:11.5px;color:var(--dim);margin-top:12px;}
+.lr-mini b{color:var(--taupe);font-weight:600;}
+.lr-table{width:100%;border-collapse:collapse;font-size:13px;}
+.lr-table th{text-align:left;font-weight:600;color:var(--dim);font-size:12px;padding:8px 10px;border-bottom:1px solid var(--line);white-space:nowrap;}
+.lr-table td{padding:9px 10px;border-bottom:1px solid var(--line);}
+.lr-table .r{text-align:right;}
+.lr-table .mono{font-variant-numeric:tabular-nums;white-space:nowrap;}
+.lr-table .muted{color:var(--dim);}
+.lr-table .ind{padding-left:22px;}
+.lr-table tr.closed td{color:var(--dim);}
+.lr-table tr.grp td{background:var(--bg);color:var(--cream);font-weight:700;font-size:12px;}
+.lr-table tr.sub td{background:${T.elev};color:var(--text);font-weight:600;}
+.lr-table tr.sum td{background:${T.elev};font-weight:800;border-top:2px solid var(--mint);}
+.lr-scrollx{overflow-x:auto;}
+.lr-input{border:1px solid var(--line);border-radius:7px;padding:6px 8px;font-size:13px;font-family:inherit;color:var(--text);background:var(--bg);}
+.lr-input:focus{outline:none;border-color:var(--mint);box-shadow:0 0 0 3px rgba(124,224,211,.16);}
+select.lr-input{cursor:pointer;}
+input[type=date].lr-input{color-scheme:dark;}
+.lr-numwrap{display:inline-flex;flex-direction:column;align-items:flex-end;}
+.lr-numwrap .lr-input{width:100%;font-variant-numeric:tabular-nums;}
+.lr-hint{font-size:10.5px;color:var(--dim);margin-top:2px;}
+.lr-add{margin-top:14px;background:none;border:1px dashed var(--mint);color:var(--mint);padding:8px 16px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;}
+.lr-add:hover{background:rgba(124,224,211,.08);}
+.lr-x{border:none;background:none;color:#5A5E66;font-size:13px;cursor:pointer;line-height:1;}
+.lr-x:hover{color:${T.loss};}
+.lr-form{display:grid;grid-template-columns:repeat(2,1fr);gap:16px;max-width:560px;}
+.lr-form label{display:flex;flex-direction:column;gap:6px;font-size:13px;font-weight:600;color:var(--dim);}
+.lr-note{margin-top:20px;padding-top:16px;border-top:1px solid var(--line);font-size:12px;color:var(--dim);display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;}
+.lr-reset{border:1px solid ${T.loss};color:${T.loss};background:none;padding:7px 14px;border-radius:8px;font-size:12px;font-weight:600;cursor:pointer;}
+.lr-backup{margin-top:24px;padding:16px;border:1px solid var(--line);border-radius:12px;background:var(--bg);}
+.lr-backup-title{font-size:13px;font-weight:700;color:var(--cream);}
+.lr-backup-desc{font-size:12px;color:var(--dim);margin-top:5px;line-height:1.5;}
+.lr-backup-btns{display:flex;gap:10px;margin-top:12px;flex-wrap:wrap;}
+.lr-btn{border:1px solid var(--mint);color:var(--mint);background:none;padding:9px 16px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;display:inline-block;}
+.lr-btn:hover{background:rgba(124,224,211,.08);}
+.lr-btn.sm{padding:6px 12px;font-size:12px;}
+.lr-btn:disabled{opacity:.5;cursor:default;}
+.lr-foot{text-align:center;color:var(--dim);font-size:11px;margin-top:24px;padding-top:14px;}
+@media(max-width:760px){.lr-kpis{grid-template-columns:repeat(2,1fr);}.lr-row2{grid-template-columns:1fr;}.lr-stats{grid-template-columns:repeat(2,1fr);}.lr-header{flex-direction:column;align-items:flex-start;gap:12px;}.lr-headline{text-align:left;}.lr-form{grid-template-columns:1fr;}}
+`;
+
+const APP_PW = "attorney0703";
+function mountApp(){
+  const root = document.getElementById('root');
+  root.innerHTML = '';
+  root.style.cssText = 'min-height:100vh;';
+  ReactDOM.createRoot(root).render(React.createElement(LifeRoad));
+}
+function showGate(){
+  const root = document.getElementById('root');
+  root.innerHTML = '';
+  root.style.cssText = 'min-height:100vh;display:flex;align-items:center;justify-content:center;background:#0B0C0E;color:#F2EEE6;font-family:system-ui,sans-serif;';
+  const box = document.createElement('div');
+  box.style.cssText = 'width:300px;text-align:center;';
+  box.innerHTML = '<div style="font-weight:800;letter-spacing:.24em;font-size:20px;color:#FBF1E6;margin-bottom:6px;">LIFE&nbsp;ROAD</div><div style="font-size:13px;color:#938E82;margin-bottom:20px;">비밀번호를 입력하세요</div>';
+  const inp = document.createElement('input');
+  inp.type = 'password'; inp.placeholder = '비밀번호';
+  inp.style.cssText = 'width:100%;box-sizing:border-box;padding:11px 12px;border:1px solid #272B31;border-radius:9px;background:#141619;color:#F2EEE6;font-size:15px;text-align:center;outline:none;';
+  const err = document.createElement('div');
+  err.style.cssText = 'color:#E8806B;font-size:12px;height:16px;margin-top:8px;';
+  const btn = document.createElement('button');
+  btn.textContent = '열기';
+  btn.style.cssText = 'width:100%;margin-top:12px;padding:11px;border:none;border-radius:9px;background:#7CE0D3;color:#0B0C0E;font-weight:700;font-size:15px;cursor:pointer;';
+  function tryOpen(){
+    if (inp.value === APP_PW){ try{ localStorage.setItem('liferoad_unlocked','1'); }catch(e){} mountApp(); }
+    else { err.textContent = '비밀번호가 올바르지 않습니다.'; inp.value=''; inp.focus(); }
+  }
+  btn.onclick = tryOpen;
+  inp.addEventListener('keydown', function(e){ if (e.key === 'Enter') tryOpen(); });
+  box.appendChild(inp); box.appendChild(err); box.appendChild(btn);
+  root.appendChild(box); inp.focus();
+}
+try { if (localStorage.getItem('liferoad_unlocked') === '1') mountApp(); else showGate(); }
+catch(e){ showGate(); }
+</script>
+<script>
+(function(){
+  function fail(m){ var r=document.getElementById('root'); if(r){ r.style.color='#E8806B'; r.textContent='화면을 불러오지 못했습니다: '+m; } }
+  try {
+    if(typeof React==='undefined'||typeof ReactDOM==='undefined') return fail('React 로드 실패 — 인터넷 연결 후 새로고침 하세요.');
+    if(typeof Recharts==='undefined') return fail('차트 라이브러리 로드 실패 — 새로고침 하세요.');
+    if(typeof Babel==='undefined') return fail('Babel 로드 실패 — 새로고침 하세요.');
+    var out = Babel.transform(document.getElementById('appsrc').textContent, { presets: [['react',{runtime:'classic'}]] }).code;
+    (0, eval)(out);
+  } catch(e){ fail(e.message); if(window.console) console.error(e); }
+})();
+</script>
+</body>
+</html>
