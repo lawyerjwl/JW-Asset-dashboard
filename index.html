@@ -24,7 +24,7 @@ window.storage = {
 </script>
 <script type="text/plain" id="appsrc">
 const { useState, useEffect, useMemo, useRef } = React;
-const { PieChart, Pie, Cell, ResponsiveContainer, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, BarChart, Bar, ReferenceLine } = Recharts;
+const { PieChart, Pie, Cell, ResponsiveContainer, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, BarChart, Bar, ReferenceLine, Legend } = Recharts;
 
 /* ----------------------------- design tokens ----------------------------- */
 const T = {
@@ -220,6 +220,26 @@ const SEED = {
   snapshots: [
     { id: "sp0", date: "2026-06-30", value: 1037413856, netWorth: 2003549981 }, // 기초 (2026.6.30)
   ],
+  invSeries: [
+    { id: "iv01", year: 2022, q: 1, principal: 231500000, value: 210300000 },
+    { id: "iv02", year: 2022, q: 2, principal: 244000000, value: 237120338 },
+    { id: "iv03", year: 2022, q: 3, principal: 257000000, value: 234000000 },
+    { id: "iv04", year: 2022, q: 4, principal: 286321632, value: 250211297 },
+    { id: "iv05", year: 2023, q: 1, principal: 324657632, value: 310753509 },
+    { id: "iv06", year: 2023, q: 2, principal: 324657632, value: 325085432 },
+    { id: "iv07", year: 2023, q: 3, principal: 314697632, value: 311113384 },
+    { id: "iv08", year: 2023, q: 4, principal: 294968484, value: 309509935 },
+    { id: "iv09", year: 2024, q: 1, principal: 344028484, value: 370515903 },
+    { id: "iv10", year: 2024, q: 2, principal: 344028484, value: 377425929 },
+    { id: "iv11", year: 2024, q: 3, principal: 344028484, value: 384440019 },
+    { id: "iv12", year: 2024, q: 4, principal: 352028484, value: 407099197 },
+    { id: "iv13", year: 2025, q: 1, principal: 452983534, value: 499095759 },
+    { id: "iv14", year: 2025, q: 2, principal: 461983534, value: 510588284 },
+    { id: "iv15", year: 2025, q: 3, principal: 461983534, value: 552194764 },
+    { id: "iv16", year: 2025, q: 4, principal: 461983535, value: 584104764 },
+    { id: "iv17", year: 2026, q: 1, principal: 598244769, value: 715345544 },
+    { id: "iv18", year: 2026, q: 2, principal: 598244769, value: 825241394 },
+  ],
 };
 
 function normalize(d) {
@@ -230,6 +250,7 @@ function normalize(d) {
   out.yearly = (d.yearly || SEED.yearly).map((y) => ({ returnAmt: null, ...y }));
   out.quarterly = d.quarterly || SEED.quarterly;
   out.snapshots = d.snapshots || SEED.snapshots;
+  out.invSeries = d.invSeries || SEED.invSeries;
   // migrate old holdings-based accounts -> transactions
   if (d.accounts && d.accounts[0] && d.accounts[0].holdings) {
     const accts = [], txns = [], prices = {};
@@ -431,6 +452,9 @@ function LifeRoad() {
   const retSeries = retView === "year" ? retYear : retQuarter;
   const retTotal = retSeries.reduce((s, x) => s + x.amt, 0);
 
+  const invTrend = useMemo(() => [...data.invSeries].sort((a, b) => a.year - b.year || a.q - b.q)
+    .map((r) => ({ label: String(r.year).slice(2) + " Q" + r.q, full: r.year + "년 " + r.q + "분기", "원금": num(r.principal), "평가액": num(r.value) })), [data.invSeries]);
+
   const retireYear = num(data.profile.birthYear) + num(data.profile.retireAge);
   const goal = [...data.yearly].sort((a, b) => b.year - a.year).find((y) => num(y.target) > 0);
   const stockNames = useMemo(() => [...new Set(data.transactions.map((t) => t.name).filter(Boolean))], [data.transactions]);
@@ -443,6 +467,7 @@ function LifeRoad() {
   const addDebt = () => set({ debts: [...data.debts, { id: uid(), name: "새 부채", category: "신용", balance: 0, rate: 0, monthly: 0, maturity: "" }] });
   const addYear = () => set({ yearly: [...data.yearly, { id: uid(), year: new Date().getFullYear(), netWorth: 0, target: 0, returnPct: 0, returnAmt: 0 }] });
   const addQuarter = () => set({ quarterly: [...data.quarterly, { id: uid(), year: new Date().getFullYear(), q: 1, returnPct: 0, returnAmt: 0 }] });
+  const addInvSeries = () => set({ invSeries: [...data.invSeries, { id: uid(), year: new Date().getFullYear(), q: 1, principal: 0, value: 0 }] });
   const saveSnapshot = () => {
     const D = today();
     const value = Math.round(investCurrent);
@@ -476,7 +501,12 @@ function LifeRoad() {
     if (yi >= 0) yearly[yi] = { ...yearly[yi], netWorth: nw, returnPct: yPct, returnAmt: Math.round(yGain) };
     else yearly.push({ id: uid(), year: Y, netWorth: nw, target: null, returnPct: yPct, returnAmt: Math.round(yGain) });
     const snapshots = [...data.snapshots.filter((s) => s.date !== D), { id: uid(), date: D, value, netWorth: nw }];
-    setData((d) => ({ ...d, quarterly, yearly, snapshots }));
+    const invSeries = [...data.invSeries];
+    const ii = invSeries.findIndex((x) => Number(x.year) === Y && Number(x.q) === Q);
+    const principalNow = Math.round(costBasis);
+    if (ii >= 0) invSeries[ii] = { ...invSeries[ii], principal: principalNow, value: value };
+    else invSeries.push({ id: uid(), year: Y, q: Q, principal: principalNow, value: value });
+    setData((d) => ({ ...d, quarterly, yearly, snapshots, invSeries }));
     setSnapMsg(`${Y}년 ${Q}분기 기록 — 손익 ${signWon(gain)} (${pct(rp)}) · 순자산 ${won(nw)} 저장됨`);
   };
   const delSnapshot = (id) => set({ snapshots: data.snapshots.filter((s) => s.id !== id) });
@@ -654,6 +684,23 @@ function LifeRoad() {
               <Stat label="연환산 수익률 (XIRR)" value={xirrRate == null ? "—" : pct(xirrRate)} color={xirrRate >= 0 ? T.mint : T.loss} />
             </div>
             <div className="lr-mini">실현손익에는 2026.6.30까지의 기존 실현손익 <b>{won(openingRealized)}</b>이 포함됩니다 (설정에서 수정). 단순 누적수익률 {pct(cumReturn)} · XIRR는 7/1 이후 거래가 쌓이면 자동 산출됩니다.</div>
+          </Card>
+
+          <Card title="투자 원금 · 평가액 추이" sub="분기별 · 평가액과 원금의 간격이 누적 손익" accent={T.mint}>
+            <ResponsiveContainer width="100%" height={260}>
+              <AreaChart data={invTrend} margin={{ top: 8, right: 12, left: 4, bottom: 0 }}>
+                <defs>
+                  <linearGradient id="gVal" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={T.mint} stopOpacity={0.28} /><stop offset="100%" stopColor={T.mint} stopOpacity={0.02} /></linearGradient>
+                </defs>
+                <CartesianGrid stroke={T.line} vertical={false} />
+                <XAxis dataKey="label" stroke={T.dim} fontSize={11} tickLine={false} interval={invTrend.length > 12 ? Math.ceil(invTrend.length / 9) : 0} />
+                <YAxis tickFormatter={eokTick} stroke={T.dim} fontSize={11} tickLine={false} width={46} />
+                <Tooltip formatter={(v, n) => [won(v), n]} labelFormatter={(l) => { const it = invTrend.find((x) => x.label === l); return it ? it.full : l; }} contentStyle={tip} />
+                <Legend wrapperStyle={{ fontSize: 12 }} />
+                <Area type="monotone" dataKey="평가액" stroke={T.mint} strokeWidth={2.5} fill="url(#gVal)" dot={false} />
+                <Area type="monotone" dataKey="원금" stroke={T.taupe} strokeWidth={2} strokeDasharray="5 4" fill="none" dot={false} />
+              </AreaChart>
+            </ResponsiveContainer>
           </Card>
 
           {/* live holdings grouped by account */}
@@ -876,6 +923,24 @@ function LifeRoad() {
               ))}</tbody>
             </table>
             <button className="lr-add" onClick={addQuarter}>+ 분기 추가</button>
+          </Card>
+
+          <Card title="투자 원금 · 평가액 (분기)" sub="대시보드 추이 그래프의 원천 · 스냅샷 저장 시 현재 분기가 자동 갱신" accent={T.mint}>
+            <div className="lr-scrollx">
+              <table className="lr-table edit">
+                <thead><tr><th className="r">연도</th><th className="r">분기</th><th className="r">투자 원금</th><th className="r">평가액</th><th className="r">평가손익</th><th></th></tr></thead>
+                <tbody>{[...data.invSeries].sort((a, b) => a.year - b.year || a.q - b.q).map((r) => (
+                  <tr key={r.id}><td className="r"><NumInput value={r.year} onChange={(v) => upd("invSeries", r.id, "year", v)} width={68} /></td>
+                    <td className="r"><select className="lr-input" value={r.q} onChange={(e) => upd("invSeries", r.id, "q", Number(e.target.value))} style={{ width: 60 }}>{[1, 2, 3, 4].map((n) => <option key={n} value={n}>{n}Q</option>)}</select></td>
+                    <td className="r"><NumInput value={r.principal} onChange={(v) => upd("invSeries", r.id, "principal", v)} hint /></td>
+                    <td className="r"><NumInput value={r.value} onChange={(v) => upd("invSeries", r.id, "value", v)} hint /></td>
+                    <td className="r mono" style={{ color: num(r.value) - num(r.principal) >= 0 ? T.mint : T.loss }}>{signWon(num(r.value) - num(r.principal))}</td>
+                    <td className="r"><button className="lr-x" onClick={() => del("invSeries", r.id)}>×</button></td></tr>
+                ))}</tbody>
+              </table>
+            </div>
+            <div className="lr-mini">2022~2026 상반기는 연금·투자 포트폴리오 기록입니다. 2026 하반기부터는 스냅샷 저장 시 토스 계좌를 포함한 전체 투자로 갱신되어, 그 시점에 한 번 계단이 생길 수 있습니다.</div>
+            <button className="lr-add" onClick={addInvSeries}>+ 분기 추가</button>
           </Card>
         </div>
       )}
