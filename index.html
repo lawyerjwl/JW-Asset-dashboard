@@ -158,7 +158,7 @@ const SEED = {
     { id: "a2", name: "통장(KB)", category: "현금성", value: 700000 },
     { id: "a3", name: "통장(토스)", category: "현금성", value: 2000000 },
     { id: "a4", name: "청약저축", category: "현금성", value: 26800000 },
-    { id: "a5", name: "우리사주", category: "실물·기타", value: 170807360 },
+    { id: "a5", name: "우리사주", category: "실물·기타", value: 175694920, link: "우리사주", shares: 12862 },
     { id: "a6", name: "보람 채권", category: "실물·기타", value: 30000000 },
   ],
   accounts: [
@@ -168,7 +168,7 @@ const SEED = {
     { id: "ac4", name: "IRP", broker: "" },
     { id: "ac5", name: "주식 위탁", broker: "토스증권" },
   ],
-  prices: { "S&P500": 26115, "S&P500 & 10 BOND": 12215, "BANK": 5478934, "TLT": 134665, "VOO": 1052212, "MMF": 104744, "미국 국채": 62400 },
+  prices: { "S&P500": 26115, "S&P500 & 10 BOND": 12215, "BANK": 5478934, "TLT": 134665, "VOO": 1052212, "MMF": 104744, "미국 국채": 62400, "우리사주": 13660 },
   transactions: [
     { id: "t1", date: OPEN, accountId: "ac1", name: "S&P500", type: "buy", shares: 18086, price: 20633, fee: 0, currency: "KRW" },
     { id: "t2", date: OPEN, accountId: "ac1", name: "S&P500 & 10 BOND", type: "buy", shares: 15186, price: 10895, fee: 0, currency: "KRW" },
@@ -177,10 +177,10 @@ const SEED = {
     { id: "t5", date: OPEN, accountId: "ac3", name: "S&P500", type: "buy", shares: 357, price: 20075, fee: 0, currency: "KRW" },
     { id: "t6", date: OPEN, accountId: "ac4", name: "S&P500", type: "buy", shares: 923, price: 20326, fee: 0, currency: "KRW" },
     { id: "t7", date: OPEN, accountId: "ac4", name: "S&P500 & 10 BOND", type: "buy", shares: 809, price: 10863, fee: 0, currency: "KRW" },
-    { id: "t8a", date: OPEN, accountId: "ac5", name: "TLT", type: "buy", shares: 238, price: 30370338 / 238, fee: 0, currency: "KRW" },
-    { id: "t8b", date: OPEN, accountId: "ac5", name: "VOO", type: "buy", shares: 40, price: 39679989 / 40, fee: 0, currency: "KRW" },
-    { id: "t8c", date: OPEN, accountId: "ac5", name: "MMF", type: "buy", shares: 398, price: 41688290 / 398, fee: 0, currency: "KRW" },
-    { id: "t8d", date: OPEN, accountId: "ac5", name: "미국 국채", type: "buy", shares: 1, price: 62400, fee: 0, currency: "USD" },
+    { id: "t8a", date: "2026-07-01", accountId: "ac5", name: "TLT", type: "buy", shares: 238, price: 30370338 / 238, fee: 0, currency: "KRW", opening: false },
+    { id: "t8b", date: "2026-07-01", accountId: "ac5", name: "VOO", type: "buy", shares: 40, price: 39679989 / 40, fee: 0, currency: "KRW", opening: false },
+    { id: "t8c", date: "2026-07-01", accountId: "ac5", name: "MMF", type: "buy", shares: 398, price: 41688290 / 398, fee: 0, currency: "KRW", opening: false },
+    { id: "t8d", date: "2026-07-01", accountId: "ac5", name: "미국 국채", type: "buy", shares: 1, price: 62400, fee: 0, currency: "USD", opening: false },
   ],
   debts: [
     { id: "d1", name: "주택담보대출1(KB)", category: "주담대", balance: 148684441, rate: 0, monthly: 0, maturity: "" },
@@ -251,6 +251,24 @@ function normalize(d) {
   out.quarterly = d.quarterly || SEED.quarterly;
   out.snapshots = d.snapshots || SEED.snapshots;
   out.invSeries = d.invSeries || SEED.invSeries;
+  // 1회 보정: 엑셀 기준 분기 시계열 복원 + 토스 계좌를 2026-07-01 편입으로 전환
+  if (!d.fixExcelBasis) {
+    out.invSeries = SEED.invSeries;
+    out.transactions = (out.transactions || []).map((t) =>
+      t.accountId === "ac5" && t.opening
+        ? { ...t, date: "2026-07-01", opening: false }
+        : t);
+    out.fixExcelBasis = true;
+  }
+  // 1회 보정: 우리사주를 실시간 주가 × 보유주식수 연동으로 전환
+  if (!d.fixEsopLink) {
+    out.assets = (out.assets || []).map((a) =>
+      a.name && a.name.indexOf("우리사주") >= 0 && !a.link
+        ? { ...a, link: "우리사주", shares: a.shares || 12862 }
+        : a);
+    out.prices = { ...(out.prices || {}), "우리사주": num((out.prices || {})["우리사주"]) || 13660 };
+    out.fixEsopLink = true;
+  }
   // migrate old holdings-based accounts -> transactions
   if (d.accounts && d.accounts[0] && d.accounts[0].holdings) {
     const accts = [], txns = [], prices = {};
@@ -402,7 +420,10 @@ function LifeRoad() {
     return r == null ? null : r * 100;
   }, [data.transactions, fx, investCurrent]);
 
-  const otherAssets = useMemo(() => data.assets.reduce((s, a) => s + num(a.value), 0), [data.assets]);
+  const assetValue = (a) => (a.link && num(a.shares) > 0)
+    ? Math.round(num(a.shares) * num(data.prices[a.link]))
+    : num(a.value);
+  const otherAssets = useMemo(() => data.assets.reduce((s, a) => s + assetValue(a), 0), [data.assets, data.prices]);
   const totalAssets = otherAssets + investCurrent;
   const totalDebt = useMemo(() => data.debts.reduce((s, d) => s + num(d.balance), 0), [data.debts]);
   const netWorth = totalAssets - totalDebt;
@@ -410,7 +431,7 @@ function LifeRoad() {
 
   const allocation = useMemo(() => {
     const m = {};
-    data.assets.forEach((a) => { m[a.category] = (m[a.category] || 0) + num(a.value); });
+    data.assets.forEach((a) => { m[a.category] = (m[a.category] || 0) + assetValue(a); });
     m["투자자산"] = (m["투자자산"] || 0) + investCurrent;
     return Object.entries(m).filter(([, v]) => v > 0).map(([name, value]) => ({ name, value }));
   }, [data.assets, investCurrent]);
@@ -431,7 +452,7 @@ function LifeRoad() {
     allocation.forEach((c) => {
       const items = c.name === "투자자산"
         ? invByClass
-        : data.assets.filter((a) => a.category === c.name && num(a.value) > 0).map((a) => ({ name: a.name, value: num(a.value) }));
+        : data.assets.filter((a) => a.category === c.name && assetValue(a) > 0).map((a) => ({ name: a.name, value: assetValue(a) }));
       const pal = SHADES[c.name] || ["#5E6B66"];
       items.forEach((it, i) => out.push({ ...it, cat: c.name, color: pal[i % pal.length] }));
     });
@@ -457,7 +478,10 @@ function LifeRoad() {
 
   const retireYear = num(data.profile.birthYear) + num(data.profile.retireAge);
   const goal = [...data.yearly].sort((a, b) => b.year - a.year).find((y) => num(y.target) > 0);
-  const stockNames = useMemo(() => [...new Set(data.transactions.map((t) => t.name).filter(Boolean))], [data.transactions]);
+  const stockNames = useMemo(() => [...new Set([
+    ...data.transactions.map((t) => t.name).filter(Boolean),
+    ...data.assets.filter((a) => a.link).map((a) => a.link),
+  ])], [data.transactions, data.assets]);
   const curOf = (nm) => { const t = data.transactions.find((x) => x.name === nm); return t ? t.currency : "KRW"; };
 
   /* ---- mutators ---- */
@@ -503,7 +527,10 @@ function LifeRoad() {
     const snapshots = [...data.snapshots.filter((s) => s.date !== D), { id: uid(), date: D, value, netWorth: nw }];
     const invSeries = [...data.invSeries];
     const ii = invSeries.findIndex((x) => Number(x.year) === Y && Number(x.q) === Q);
-    const principalNow = Math.round(costBasis);
+    // 원금 = 직전 분기 원금 + 그 사이 순입금 (엑셀과 동일한 '납입원금' 방식)
+    const prevInv = [...invSeries].sort((a, b) => b.year - a.year || b.q - a.q)
+      .find((x) => Number(x.year) < Y || (Number(x.year) === Y && Number(x.q) < Q));
+    const principalNow = Math.round((prevInv ? num(prevInv.principal) : 0) + netFlow);
     if (ii >= 0) invSeries[ii] = { ...invSeries[ii], principal: principalNow, value: value };
     else invSeries.push({ id: uid(), year: Y, q: Q, principal: principalNow, value: value });
     setData((d) => ({ ...d, quarterly, yearly, snapshots, invSeries }));
@@ -780,15 +807,26 @@ function LifeRoad() {
       {tab === "assets" && (
         <div className="lr-grid">
           <Card title="자산 입력" sub="투자자산은 '투자·거래내역' 탭에서 관리됩니다 (이중계상 방지)">
-            <table className="lr-table edit">
-              <thead><tr><th>항목명</th><th>분류</th><th className="r">평가액 (원)</th><th></th></tr></thead>
-              <tbody>{data.assets.map((a) => (
-                <tr key={a.id}><td><TextInput value={a.name} onChange={(v) => upd("assets", a.id, "name", v)} /></td>
-                  <td><select className="lr-input" value={a.category} onChange={(e) => upd("assets", a.id, "category", e.target.value)}>{["현금성", "부동산", "연금·보험", "실물·기타"].map((c) => <option key={c}>{c}</option>)}</select></td>
-                  <td className="r"><NumInput value={a.value} onChange={(v) => upd("assets", a.id, "value", v)} hint /></td>
-                  <td className="r"><button className="lr-x" onClick={() => del("assets", a.id)}>×</button></td></tr>
-              ))}</tbody>
-            </table>
+            <div className="lr-scrollx">
+              <table className="lr-table edit">
+                <thead><tr><th>항목명</th><th>분류</th><th className="r">보유주식수</th><th className="r">평가액 (원)</th><th></th></tr></thead>
+                <tbody>{data.assets.map((a) => (
+                  <tr key={a.id}><td><TextInput value={a.name} onChange={(v) => upd("assets", a.id, "name", v)} /></td>
+                    <td><select className="lr-input" value={a.category} onChange={(e) => upd("assets", a.id, "category", e.target.value)}>{["현금성", "부동산", "연금·보험", "실물·기타"].map((c) => <option key={c}>{c}</option>)}</select></td>
+                    <td className="r">{a.link
+                      ? <NumInput value={a.shares} onChange={(v) => upd("assets", a.id, "shares", v)} width={90} />
+                      : <span className="muted">—</span>}</td>
+                    <td className="r">{a.link
+                      ? <span style={{ display: "inline-flex", flexDirection: "column", alignItems: "flex-end" }}>
+                          <b className="mono">{won(assetValue(a))}</b>
+                          <small style={{ fontSize: 10, color: T.dim }}>{num(data.prices[a.link]).toLocaleString()}원 × {num(a.shares).toLocaleString()}주 · 자동</small>
+                        </span>
+                      : <NumInput value={a.value} onChange={(v) => upd("assets", a.id, "value", v)} hint />}</td>
+                    <td className="r"><button className="lr-x" onClick={() => del("assets", a.id)}>×</button></td></tr>
+                ))}</tbody>
+              </table>
+            </div>
+            <div className="lr-mini">우리사주는 <b>보유주식수 × 실시간 주가</b>로 자동 계산됩니다. 주식수가 바뀌면 위에서 수정하세요.</div>
             <button className="lr-add" onClick={addAsset}>+ 자산 추가</button>
           </Card>
         </div>
