@@ -168,7 +168,7 @@ const SEED = {
     { id: "ac4", name: "IRP", broker: "" },
     { id: "ac5", name: "주식 위탁", broker: "토스증권" },
   ],
-  prices: { "S&P500": 26115, "S&P500 & 10 BOND": 12215, "BANK": 5478934, "TLT": 134665, "VOO": 1052212, "MMF": 104744, "미국 국채": 62400, "우리사주": 13660 },
+  prices: { "S&P500": 26115, "S&P500 & 10 BOND": 12215, "BANK": 5478934, "TLT": 134665, "VOO": 1052212, "MMF": 104744, "미국 국채": 96345600, "우리사주": 13660 },
   transactions: [
     { id: "t1", date: OPEN, accountId: "ac1", name: "S&P500", type: "buy", shares: 18086, price: 20633, fee: 0, currency: "KRW" },
     { id: "t2", date: OPEN, accountId: "ac1", name: "S&P500 & 10 BOND", type: "buy", shares: 15186, price: 10895, fee: 0, currency: "KRW" },
@@ -180,7 +180,7 @@ const SEED = {
     { id: "t8a", date: "2026-07-01", accountId: "ac5", name: "TLT", type: "buy", shares: 238, price: 30370338 / 238, fee: 0, currency: "KRW", opening: false },
     { id: "t8b", date: "2026-07-01", accountId: "ac5", name: "VOO", type: "buy", shares: 40, price: 39679989 / 40, fee: 0, currency: "KRW", opening: false },
     { id: "t8c", date: "2026-07-01", accountId: "ac5", name: "MMF", type: "buy", shares: 398, price: 41688290 / 398, fee: 0, currency: "KRW", opening: false },
-    { id: "t8d", date: "2026-07-01", accountId: "ac5", name: "미국 국채", type: "buy", shares: 1, price: 62400, fee: 0, currency: "USD", opening: false },
+    { id: "t8d", date: "2026-07-01", accountId: "ac5", name: "미국 국채", type: "buy", shares: 1, price: 92911247, fee: 0, currency: "KRW", opening: false },
   ],
   debts: [
     { id: "d1", name: "주택담보대출1(KB)", category: "주담대", balance: 148684441, rate: 0, monthly: 0, maturity: "" },
@@ -251,24 +251,6 @@ function normalize(d) {
   out.quarterly = d.quarterly || SEED.quarterly;
   out.snapshots = d.snapshots || SEED.snapshots;
   out.invSeries = d.invSeries || SEED.invSeries;
-  // 1회 보정: 엑셀 기준 분기 시계열 복원 + 토스 계좌를 2026-07-01 편입으로 전환
-  if (!d.fixExcelBasis) {
-    out.invSeries = SEED.invSeries;
-    out.transactions = (out.transactions || []).map((t) =>
-      t.accountId === "ac5" && t.opening
-        ? { ...t, date: "2026-07-01", opening: false }
-        : t);
-    out.fixExcelBasis = true;
-  }
-  // 1회 보정: 우리사주를 실시간 주가 × 보유주식수 연동으로 전환
-  if (!d.fixEsopLink) {
-    out.assets = (out.assets || []).map((a) =>
-      a.name && a.name.indexOf("우리사주") >= 0 && !a.link
-        ? { ...a, link: "우리사주", shares: a.shares || 12862 }
-        : a);
-    out.prices = { ...(out.prices || {}), "우리사주": num((out.prices || {})["우리사주"]) || 13660 };
-    out.fixEsopLink = true;
-  }
   // migrate old holdings-based accounts -> transactions
   if (d.accounts && d.accounts[0] && d.accounts[0].holdings) {
     const accts = [], txns = [], prices = {};
@@ -287,6 +269,35 @@ function normalize(d) {
   }
   delete out.investments;
   out.transactions = (out.transactions || []).map((t) => ({ ...t, opening: t.opening !== undefined ? t.opening : (t.date === OPEN) }));
+
+  // ── 1회 보정 (반드시 위 대입 이후에 실행) ──
+  // 엑셀 기준 분기 시계열 복원 + 토스 계좌를 2026-07-01 편입(순입금)으로 전환
+  if (!d.fixExcelBasis) {
+    out.invSeries = SEED.invSeries;
+    out.transactions = out.transactions.map((t) =>
+      t.accountId === "ac5" && t.opening
+        ? { ...t, date: "2026-07-01", opening: false }
+        : t);
+    out.fixExcelBasis = true;
+  }
+  // 미국 국채를 원화 기준(실제 매입원금)으로 전환 — 환율 변동이 원금을 흔들지 않도록
+  if (!d.fixBondKRW) {
+    out.transactions = out.transactions.map((t) =>
+      t.name === "미국 국채" && t.currency === "USD"
+        ? { ...t, currency: "KRW", shares: 1, price: 92911247 }
+        : t);
+    out.prices = { ...out.prices, "미국 국채": num(out.prices["미국 국채"]) === 62400 ? 96345600 : num(out.prices["미국 국채"]) };
+    out.fixBondKRW = true;
+  }
+  // 우리사주를 실시간 주가 × 보유주식수 연동으로 전환
+  if (!d.fixEsopLink) {
+    out.assets = (out.assets || []).map((a) =>
+      a.name && a.name.indexOf("우리사주") >= 0 && !a.link
+        ? { ...a, link: "우리사주", shares: a.shares || 12862 }
+        : a);
+    out.prices = { ...out.prices, "우리사주": num(out.prices["우리사주"]) || 13660 };
+    out.fixEsopLink = true;
+  }
   return out;
 }
 
