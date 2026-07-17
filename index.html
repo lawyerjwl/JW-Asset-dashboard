@@ -290,6 +290,31 @@ function normalize(d) {
   if (!num(out.prices["우리사주"])) out.prices = { ...out.prices, "우리사주": 13660 };
   // 4) 엑셀 기준 분기 시계열 복원 (1회)
   if (!d.invSeriesExcelV2) { out.invSeries = SEED.invSeries; out.invSeriesExcelV2 = true; }
+  // 5) 오염 복구: 2026 Q3 이후 분기 손익은 invSeries(원금·평가액)에서 역산해 재계산
+  //    분기손익 = (평가액−원금) − (직전 평가액−직전 원금)  → 옛 버그가 남긴 잘못된 값 자동 교정
+  {
+    const iv = [...(out.invSeries || [])].sort((a, b) => a.year - b.year || a.q - b.q);
+    const after = (y, q) => y > 2026 || (y === 2026 && q >= 3);
+    out.quarterly = (out.quarterly || []).map((qr) => {
+      const y = Number(qr.year), q = Number(qr.q);
+      if (!after(y, q)) return qr;
+      const idx = iv.findIndex((x) => Number(x.year) === y && Number(x.q) === q);
+      if (idx < 1) return qr;
+      const cur = iv[idx], prev = iv[idx - 1];
+      const gain = (num(cur.value) - num(cur.principal)) - (num(prev.value) - num(prev.principal));
+      const rp = num(prev.value) ? Math.round((gain / num(prev.value)) * 1000) / 10 : 0;
+      return { ...qr, returnAmt: Math.round(gain), returnPct: rp };
+    });
+    // 2026 연간 = 그 해 분기 합
+    const yq = out.quarterly.filter((x) => Number(x.year) === 2026);
+    if (yq.length) {
+      const yGain = yq.reduce((s, x) => s + num(x.returnAmt), 0);
+      const yPct = Math.round(yq.reduce((s, x) => s + num(x.returnPct), 0) * 10) / 10;
+      out.yearly = (out.yearly || []).map((yr) => Number(yr.year) === 2026
+        ? { ...yr, returnAmt: Math.round(yGain), returnPct: yPct }
+        : yr);
+    }
+  }
   return out;
 }
 
