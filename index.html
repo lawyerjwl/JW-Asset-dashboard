@@ -302,13 +302,24 @@ function normalize(d) {
   {
     const iv = [...(out.invSeries || [])].sort((a, b) => a.year - b.year || a.q - b.q);
     const after = (y, q) => y > 2026 || (y === 2026 && q >= 3);
+    const fxN = num((out.profile || {}).fx) || 1;
+    const qEnd = (y, q) => { const m = q * 3; const dd = new Date(y, m, 0).getDate(); return `${y}-${String(m).padStart(2, "0")}-${dd}`; };
+    const qDivOf = (y, q) => {
+      const s = q === 1 ? qEnd(y - 1, 4) : qEnd(y, q - 1);
+      const e = qEnd(y, q);
+      return (out.transactions || []).reduce((sum, t) => {
+        if (t.opening || t.type !== "dividend") return sum;
+        if (t.date > s && t.date <= e) return sum + (num(t.price) - num(t.fee)) * (t.currency === "USD" ? fxN : 1);
+        return sum;
+      }, 0);
+    };
     out.quarterly = (out.quarterly || []).map((qr) => {
       const y = Number(qr.year), q = Number(qr.q);
       if (!after(y, q)) return qr;
       const idx = iv.findIndex((x) => Number(x.year) === y && Number(x.q) === q);
       if (idx < 1) return qr;
       const cur = iv[idx], prev = iv[idx - 1];
-      const gain = (num(cur.value) - num(cur.principal)) - (num(prev.value) - num(prev.principal));
+      const gain = (num(cur.value) - num(cur.principal)) - (num(prev.value) - num(prev.principal)) + qDivOf(y, q);
       const rp = num(prev.value) ? Math.round((gain / num(prev.value)) * 1000) / 10 : 0;
       return { ...qr, returnAmt: Math.round(gain), returnPct: rp };
     });
@@ -387,6 +398,7 @@ function LifeRoad() {
   const [divText, setDivText] = useState("");
   const [divForm, setDivForm] = useState({ date: today(), accountId: "", name: "", type: "dividend", shares: "", price: "", fee: "", amount: "", tax: "" });
   const [divMsg, setDivMsg] = useState("");
+  const [parsedList, setParsedList] = useState([]);
   const [backupMsg, setBackupMsg] = useState("");
   const backupTimer = useRef(null);
 
@@ -435,12 +447,12 @@ function LifeRoad() {
   const unrealTotal = positions.reduce((s, p) => s + p.unrealizedKRW, 0);
   const realizedLedger = positions.reduce((s, p) => s + p.realizedKRW, 0);
   const openingRealized = num(data.profile.openingRealized);
-  const realizedTotal = realizedLedger + openingRealized;
   const dividendTotal = positions.reduce((s, p) => s + p.dividendsKRW, 0);
+  const realizedTotal = realizedLedger + openingRealized + dividendTotal; // 배당 포함
   const investedTotal = positions.reduce((s, p) => s + p.investedKRW, 0);
   const costBasis = positions.reduce((s, p) => s + p.avgCost * p.shares * p.conv, 0);
   const unrealReturn = costBasis ? (unrealTotal / costBasis) * 100 : 0;
-  const cumPL = unrealTotal + realizedTotal + dividendTotal;
+  const cumPL = unrealTotal + realizedTotal; // 실현손익에 배당이 이미 포함
   const cumReturn = investedTotal ? (cumPL / investedTotal) * 100 : 0;
 
   const xirrRate = useMemo(() => {
@@ -545,15 +557,17 @@ function LifeRoad() {
     const startValue = prevInv ? num(prevInv.value) : value;
     const startPrincipal = prevInv ? num(prevInv.principal) : 0;
     let netFlow = 0; // 이번 분기 순입금 = 매수 − 매도 (기초잔고 제외)
+    let qDiv = 0;    // 이번 분기 배당 (세후) — 손익에 가산
     data.transactions.forEach((t) => {
       if (t.opening) return;
       if (t.date > startDate && t.date <= D) {
         const conv = t.currency === "USD" ? fx : 1;
         if (t.type === "buy") netFlow += (num(t.shares) * num(t.price) + num(t.fee)) * conv;
         else if (t.type === "sell") netFlow -= (num(t.shares) * num(t.price) - num(t.fee)) * conv;
+        else if (t.type === "dividend") qDiv += (num(t.price) - num(t.fee)) * conv;
       }
     });
-    const gain = value - startValue - netFlow;
+    const gain = value - startValue - netFlow + qDiv;
     const rp = startValue ? Math.round((gain / startValue) * 1000) / 10 : 0;
     const quarterly = [...data.quarterly];
     const qi = quarterly.findIndex((x) => Number(x.year) === Y && Number(x.q) === Q);
@@ -604,65 +618,102 @@ function LifeRoad() {
   };
   const parseDividend = () => {
     const t = (divText || "").replace(/\u00a0/g, " ");
-    if (!t.trim()) { setDivMsg("먼저 카톡 메시지를 붙여넣으세요."); return; }
-    const f = { ...divForm };
-    // 구분
-    if (/매수/.test(t)) f.type = "buy";
-    else if (/매도/.test(t)) f.type = "sell";
-    else if (/배당|분배금/.test(t)) f.type = "dividend";
-    // 날짜
-    const m1 = t.match(/(20\d{2})\s*[.\-/년]\s*(\d{1,2})\s*[.\-/월]\s*(\d{1,2})/);
-    const m2 = t.match(/(\d{1,2})\s*[./월]\s*(\d{1,2})\s*일?/);
+    if (!t.trim()) { setDivMsg("먼저 내용을 붙여넣으세요."); return; }
+    // 전체 문맥: 계좌 (끝자리 우선, 없으면 증권사 이름)
+    const pick = (pred) => { const a = data.accounts.find(pred); return a ? a.id : ""; };
+    let ctxAcct = acctBySuffix(t);
+    if (!ctxAcct) {
+      if (/토스/.test(t)) ctxAcct = pick((a) => ((a.broker || "") + (a.name || "")).includes("토스"));
+      else if (/미래에셋/.test(t)) ctxAcct = pick((a) => ((a.broker || "") + (a.name || "")).includes("미래"));
+      else if (/삼성/.test(t)) ctxAcct = pick((a) => ((a.broker || "") + (a.name || "")).includes("삼성"));
+      else if (/IRP/i.test(t)) ctxAcct = pick((a) => (a.name || "").toUpperCase().includes("IRP"));
+      else if (/ISA/i.test(t)) ctxAcct = pick((a) => (a.name || "").toUpperCase().includes("ISA"));
+      else if (/한국투자|퇴직연금/.test(t)) ctxAcct = pick((a) => (a.name || "").includes("퇴직"));
+    }
     const pad = (n) => String(n).padStart(2, "0");
-    if (m1) f.date = `${m1[1]}-${pad(m1[2])}-${pad(m1[3])}`;
-    else if (m2) f.date = `${new Date().getFullYear()}-${pad(m2[1])}-${pad(m2[2])}`;
-    // 계좌 (끝자리 매핑)
-    const acc = acctBySuffix(t);
-    if (acc) f.accountId = acc;
-    // 종목 별칭 우선 매칭 — 'S&P500미국채혼합50' → BOND, 'KODEX 200/코스피' → KOSPI
+    const YEAR = new Date().getFullYear();
     const ALIAS = [
       [/미국채\s*혼합|S&P\s*500\s*&\s*10|10\s*BOND/i, "S&P500 & 10 BOND"],
       [/KODEX\s*200|코스피|KOSPI|069500/i, "KOSPI"],
     ];
-    const al = ALIAS.find(([re]) => re.test(t));
-    if (al) f.name = al[1];
-    else {
-      // 종목 (긴 이름 우선 매칭 — 'S&P500 & 10 BOND'가 'S&P500'보다 먼저)
-      const low = t.toLowerCase();
-      const hit = [...stockNames].sort((a, b) => String(b).length - String(a).length)
-        .find((n) => n && low.includes(String(n).toLowerCase()));
-      if (hit) f.name = hit;
+    const namesByLen = [...stockNames].sort((a, b) => String(b).length - String(a).length);
+    // 절 분해 (숫자 안의 콤마는 유지)
+    const clauses = t.split(/,(?!\d)|\n|;|·(?=\s)/).map((s) => s.trim()).filter(Boolean);
+    let ctxDate = null;
+    const trades = [];
+    for (const c of clauses) {
+      const tr = { date: "", accountId: ctxAcct, name: "", type: "", shares: "", price: "", fee: "", amount: "", tax: "" };
+      // 날짜 ('같은 날'은 직전 날짜 상속)
+      const m1 = c.match(/(20\d{2})\s*[.\-/년]\s*(\d{1,2})\s*[.\-/월]\s*(\d{1,2})/);
+      const m2 = c.match(/(\d{1,2})\s*[./월]\s*(\d{1,2})\s*일?/);
+      if (m1) ctxDate = `${m1[1]}-${pad(m1[2])}-${pad(m1[3])}`;
+      else if (m2) ctxDate = `${YEAR}-${pad(m2[1])}-${pad(m2[2])}`;
+      else if (/같은\s*날/.test(c) && ctxDate) { /* keep ctxDate */ }
+      tr.date = ctxDate || today();
+      // 구분
+      if (/매수|구매|삽니다/.test(c)) tr.type = "buy";
+      else if (/매도|판매|팝니다/.test(c)) tr.type = "sell";
+      else if (/배당|분배금/.test(c)) tr.type = "dividend";
+      // 계좌 (절 안에 끝자리가 따로 있으면 우선)
+      const ca = acctBySuffix(c);
+      if (ca) tr.accountId = ca;
+      // 종목 (별칭 → 긴 이름 우선)
+      const al = ALIAS.find(([re]) => re.test(c));
+      if (al) tr.name = al[1];
+      else {
+        const low = c.toLowerCase();
+        const hit = namesByLen.find((n) => n && low.includes(String(n).toLowerCase()));
+        if (hit) tr.name = hit;
+      }
+      // 수량·단가·수수료
+      const sh = c.match(/([\d,]+(?:\.\d+)?)\s*주/);
+      if (sh) tr.shares = Number(sh[1].replace(/,/g, ""));
+      const pr = c.match(/(?:체결\s*단가|평균\s*단가|단가|체결가|가격)\s*[:\s]*\$?\s*([\d,]+(?:\.\d+)?)/);
+      if (pr) tr.price = Number(pr[1].replace(/,/g, ""));
+      else {
+        const w = c.match(/([\d,]+(?:\.\d+)?)\s*원/);
+        if (w) tr.price = Number(w[1].replace(/,/g, ""));
+      }
+      const feeM = c.match(/수수료\s*[:\s]*([\d,]+(?:\.\d+)?)/);
+      if (feeM) tr.fee = Number(feeM[1].replace(/,/g, ""));
+      const totM = c.match(/(?:체결\s*금액|거래\s*금액|매수\s*금액|매도\s*금액)\s*[:\s]*([\d,]+)/);
+      if (totM && !tr.price && num(tr.shares) > 0) tr.price = Math.round(Number(totM[1].replace(/,/g, "")) / num(tr.shares) * 100) / 100;
+      // 배당
+      const taxM = c.match(/(?:세금|원천징수|제세금|소득세)[^0-9]{0,12}([0-9][0-9,]{2,})/);
+      if (taxM) tr.tax = Number(taxM[1].replace(/,/g, ""));
+      if (tr.type === "dividend") {
+        const amtM = c.match(/(?:배당금|배당|분배금|입금액|지급액|금액)[^0-9]{0,12}([0-9][0-9,]{2,})/);
+        if (amtM) tr.amount = Number(amtM[1].replace(/,/g, ""));
+        else if (tr.price) { tr.amount = tr.price; tr.price = ""; }
+      }
+      // 유효성: 종목+구분+핵심값이 있어야 거래로 인정
+      const ok = tr.name && tr.type && (tr.type === "dividend" ? num(tr.amount) > 0 : (num(tr.shares) > 0 && num(tr.price) > 0));
+      if (ok) trades.push(tr);
     }
-    // 수량·단가·수수료·금액
-    const sh = t.match(/([\d,]+(?:\.\d+)?)\s*주/);
-    if (sh) f.shares = Number(sh[1].replace(/,/g, ""));
-    const pr = t.match(/(?:체결\s*단가|평균\s*단가|단가|체결가|가격)\s*[:\s]*\$?\s*([\d,]+(?:\.\d+)?)/);
-    if (pr) f.price = Number(pr[1].replace(/,/g, ""));
-    const feeM = t.match(/수수료\s*[:\s]*([\d,]+(?:\.\d+)?)/);
-    if (feeM) f.fee = Number(feeM[1].replace(/,/g, ""));
-    const totM = t.match(/(?:체결\s*금액|거래\s*금액|매수\s*금액|매도\s*금액)\s*[:\s]*([\d,]+)/);
-    if (totM && !f.price && num(f.shares) > 0) f.price = Math.round(Number(totM[1].replace(/,/g, "")) / num(f.shares) * 100) / 100;
-    // 배당 금액·세금
-    const taxM = t.match(/(?:세금|원천징수|제세금|소득세)[^0-9]{0,12}([0-9][0-9,]{2,})/);
-    if (taxM) f.tax = Number(taxM[1].replace(/,/g, ""));
-    const amtM = t.match(/(?:배당금|배당|분배금|입금액|지급액|금액)[^0-9]{0,12}([0-9][0-9,]{2,})/);
-    if (amtM) f.amount = Number(amtM[1].replace(/,/g, ""));
-    else if (f.type === "dividend") {
-      const nums = [...t.matchAll(/([0-9][0-9,]{2,})\s*(?:원|KRW)?/gi)].map((m) => Number(m[1].replace(/,/g, ""))).filter((n) => n >= 100 && n < 1e11 && n !== num(f.tax));
-      if (nums.length) f.amount = Math.max(...nums);
+    if (!trades.length) { setParsedList([]); setDivMsg("거래를 찾지 못했습니다. 형식을 확인하거나 아래에 직접 입력하세요."); return; }
+    if (trades.length === 1) {
+      setParsedList([]);
+      setDivForm({ ...divForm, ...trades[0] });
+      const f = trades[0];
+      setDivMsg(`추출됨 — ${f.type === "buy" ? "매수" : f.type === "sell" ? "매도" : "배당"} · ${f.name} · ${f.type === "dividend" ? won(f.amount) : `${num(f.shares).toLocaleString()}주 × ${num(f.price).toLocaleString()}`} (아래에서 확인 후 추가하세요)`);
+      return;
     }
-    setDivForm(f);
-    const accName2 = (data.accounts.find((a) => a.id === f.accountId) || {}).name;
-    const parts = [
-      f.type === "buy" ? "매수" : f.type === "sell" ? "매도" : "배당",
-      accName2 && `계좌 ${accName2}`,
-      f.name && `종목 ${f.name}`,
-      f.type === "dividend" ? (f.amount && `배당 ${won(f.amount)}`) : (num(f.shares) > 0 && `${num(f.shares).toLocaleString()}주`),
-      f.type !== "dividend" && f.price && `단가 ${num(f.price).toLocaleString()}`,
-      f.tax && `세금 ${won(f.tax)}`,
-    ].filter(Boolean);
-    setDivMsg(`추출됨 — ${parts.join(" · ")} (아래에서 확인 후 추가하세요)`);
+    setParsedList(trades);
+    setDivMsg(`${trades.length}건의 거래를 추출했습니다 — 아래 목록을 확인하고 '모두 추가'를 누르세요.`);
   };
+  const addAllParsed = () => {
+    if (!parsedList.length) return;
+    const txns = parsedList.map((f) => {
+      const base = { id: uid(), date: f.date || today(), accountId: f.accountId || data.accounts[0]?.id || "", name: f.name, currency: curOf(f.name) || "KRW", opening: false };
+      return f.type === "dividend"
+        ? { ...base, type: "dividend", shares: 0, price: num(f.amount), fee: num(f.tax) }
+        : { ...base, type: f.type, shares: num(f.shares), price: num(f.price), fee: num(f.fee) };
+    });
+    set({ transactions: [...data.transactions, ...txns] });
+    setDivMsg(`${txns.length}건 추가 완료 — 거래내역에 반영되었습니다.`);
+    setParsedList([]); setDivText("");
+  };
+  const delParsed = (i) => setParsedList(parsedList.filter((_, j) => j !== i));
   const addQuick = () => {
     const isDiv = divForm.type === "dividend";
     if (!divForm.name) { setDivMsg("종목을 확인하세요."); return; }
@@ -844,7 +895,7 @@ function LifeRoad() {
             <div className="lr-stats">
               <Stat label="평가액" value={won(investCurrent)} color={T.text} />
               <Stat label="평가손익 (미실현)" value={signWon(unrealTotal)} color={unrealTotal >= 0 ? T.mint : T.loss} />
-              <Stat label="실현손익" value={signWon(realizedTotal)} color={realizedTotal >= 0 ? T.mint : T.loss} />
+              <Stat label="실현손익 (배당 포함)" value={signWon(realizedTotal)} color={realizedTotal >= 0 ? T.mint : T.loss} />
               <Stat label="배당 (세후)" value={signWon(dividendTotal)} color={T.taupe} />
               <Stat label="누적손익" value={signWon(cumPL)} color={cumPL >= 0 ? T.mint : T.loss} />
               <Stat label="연환산 수익률 (XIRR)" value={xirrRate == null ? "—" : pct(xirrRate)} color={xirrRate >= 0 ? T.mint : T.loss} />
@@ -886,7 +937,7 @@ function LifeRoad() {
                     if (!ps.length) return null;
                     const mv = ps.reduce((s, p) => s + p.mvKRW, 0);
                     const ur = ps.reduce((s, p) => s + p.unrealizedKRW, 0);
-                    const rl = ps.reduce((s, p) => s + p.realizedKRW, 0);
+                    const rl = ps.reduce((s, p) => s + p.realizedKRW + p.dividendsKRW, 0);
                     const basis = ps.reduce((s, p) => s + p.avgCost * p.shares * p.conv, 0);
                     const r = basis ? (ur / basis) * 100 : null;
                     return (
@@ -903,7 +954,7 @@ function LifeRoad() {
                               <td className="r mono">{closed ? "—" : priceFmt(p.currentPrice, p.currency)}</td>
                               <td className="r mono">{closed ? "—" : won(p.mvKRW)}</td>
                               <td className="r mono" style={{ color: p.unrealizedKRW >= 0 ? T.mint : T.loss }}>{closed ? "—" : signWon(p.unrealizedKRW)}</td>
-                              <td className="r mono" style={{ color: p.realizedKRW >= 0 ? T.mint : T.loss }}>{p.realized ? signWon(p.realizedKRW) : "—"}</td>
+                              <td className="r mono" style={{ color: p.realizedKRW + p.dividendsKRW >= 0 ? T.mint : T.loss }}>{(p.realized || p.dividends) ? signWon(p.realizedKRW + p.dividendsKRW) : "—"}</td>
                               <td className="r mono" style={{ color: (r2 || 0) >= 0 ? T.mint : T.loss }}>{r2 == null ? "—" : pct(r2)}</td>
                             </tr>
                           );
@@ -988,7 +1039,34 @@ function LifeRoad() {
               <button className="lr-btn sm" onClick={parseDividend}>붙여넣은 내용 분석</button>
               {divText && <button className="lr-btn sm" onClick={() => { setDivText(""); setDivMsg(""); }}>지우기</button>}
             </div>
-            {divMsg && <div className="lr-mini" style={{ marginTop: 8, color: /추가됨/.test(divMsg) ? T.mint : T.dim }}>{divMsg}</div>}
+            {divMsg && <div className="lr-mini" style={{ marginTop: 8, color: /추가\s*(됨|완료)/.test(divMsg) ? T.mint : T.dim }}>{divMsg}</div>}
+            {parsedList.length > 0 && (
+              <div style={{ marginTop: 10 }}>
+                <div className="lr-scrollx">
+                  <table className="lr-table">
+                    <thead><tr><th>날짜</th><th>계좌</th><th>구분</th><th>종목</th><th className="r">수량</th><th className="r">단가/금액</th><th className="r">합계</th><th></th></tr></thead>
+                    <tbody>{parsedList.map((f, i) => {
+                      const acc = data.accounts.find((a) => a.id === f.accountId);
+                      const isDiv = f.type === "dividend";
+                      return (
+                        <tr key={i}>
+                          <td className="mono">{f.date}</td>
+                          <td className="muted">{acc ? acc.name + (acc.broker ? `(${acc.broker})` : "") : "—"}</td>
+                          <td style={{ color: f.type === "buy" ? T.mint : f.type === "sell" ? T.loss : T.taupe, fontWeight: 700 }}>
+                            {f.type === "buy" ? "매수" : f.type === "sell" ? "매도" : "배당"}</td>
+                          <td>{f.name}</td>
+                          <td className="r mono">{isDiv ? "—" : num(f.shares).toLocaleString()}</td>
+                          <td className="r mono">{isDiv ? won(f.amount) : num(f.price).toLocaleString()}</td>
+                          <td className="r mono">{isDiv ? won(num(f.amount) - num(f.tax)) : won(num(f.shares) * num(f.price))}</td>
+                          <td className="r"><button className="lr-x" onClick={() => delParsed(i)}>×</button></td>
+                        </tr>
+                      );
+                    })}</tbody>
+                  </table>
+                </div>
+                <button className="lr-add" onClick={addAllParsed}>+ {parsedList.length}건 모두 추가</button>
+              </div>
+            )}
             <div className="lr-scrollx">
               <table className="lr-table edit" style={{ marginTop: 10 }}>
                 <thead><tr><th>날짜</th><th>계좌</th><th>구분</th><th>종목</th>
