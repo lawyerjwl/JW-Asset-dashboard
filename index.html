@@ -399,6 +399,7 @@ function LifeRoad() {
   const [divForm, setDivForm] = useState({ date: today(), accountId: "", name: "", type: "dividend", shares: "", price: "", fee: "", amount: "", tax: "" });
   const [divMsg, setDivMsg] = useState("");
   const [parsedList, setParsedList] = useState([]);
+  const [inboxMsg, setInboxMsg] = useState("");
   const [backupMsg, setBackupMsg] = useState("");
   const backupTimer = useRef(null);
 
@@ -434,6 +435,36 @@ function LifeRoad() {
     }, 4000);
     return () => clearTimeout(backupTimer.current);
   }, [data, loaded]);
+
+  // 앱 수신함: 열릴 때 한 번 확인 → 거래내역에 합치고 수신함 비움
+  useEffect(() => {
+    if (!loaded) return;
+    const server = (data.profile.priceServer || "").trim().replace(/\/+$/, "");
+    const key = (data.profile.backupKey || "").trim();
+    if (!server || !key) return;
+    let dead = false;
+    (async () => {
+      try {
+        const r = await fetch(`${server}/inbox?key=${encodeURIComponent(key)}`);
+        if (!r.ok || dead) return;
+        const j = await r.json().catch(() => ({}));
+        const items = Array.isArray(j.items) ? j.items : [];
+        if (!items.length) return;
+        let added = 0;
+        setData((d) => {
+          const have = new Set(d.transactions.map((t) => t.id));
+          const add = items
+            .filter((t) => t && t.id && !have.has(t.id) && t.name && t.type)
+            .map((t) => ({ opening: false, currency: "KRW", fee: 0, shares: 0, price: 0, ...t }));
+          added = add.length;
+          return add.length ? { ...d, transactions: [...d.transactions, ...add] } : d;
+        });
+        setInboxMsg(`앱에서 보낸 거래 ${items.length}건 반영됨 (${new Date().toLocaleTimeString("ko-KR")})`);
+        await fetch(`${server}/inbox/clear?key=${encodeURIComponent(key)}`, { method: "POST" });
+      } catch (e) { /* 서버 미설정/오프라인이면 조용히 무시 */ }
+    })();
+    return () => { dead = true; };
+  }, [loaded]);
 
   const set = (patch) => setData((d) => ({ ...d, ...patch }));
   const fx = num(data.profile.fx) || 1;
@@ -814,6 +845,13 @@ function LifeRoad() {
         {[["dashboard", "대시보드"], ["assets", "자산"], ["invest", "투자·거래내역"], ["debt", "부채"], ["history", "수익 기록"], ["settings", "설정"]]
           .map(([k, label]) => <button key={k} className={"lr-tab" + (tab === k ? " on" : "")} onClick={() => setTab(k)}>{label}</button>)}
       </nav>
+
+      {inboxMsg && (
+        <div style={{ margin: "0 0 12px", padding: "9px 14px", borderRadius: 10, background: "rgba(124,224,211,0.10)", border: `1px solid ${T.mint}`, color: T.mint, fontSize: 13, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <span>📲 {inboxMsg}</span>
+          <button className="lr-x" onClick={() => setInboxMsg("")}>×</button>
+        </div>
+      )}
 
       {/* ============================ DASHBOARD ============================ */}
       {tab === "dashboard" && (
