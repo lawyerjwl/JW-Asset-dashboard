@@ -1576,7 +1576,7 @@ function LifeRoad() {
     const ALIAS = [[/미국채\s*혼합|S&P\s*500\s*&\s*10|10\s*BOND/i, "S&P500 & 10 BOND"], [/KODEX\s*200|코스피|KOSPI|069500/i, "KOSPI"]];
     const namesByLen = [...stockNames].sort((a, b) => String(b).length - String(a).length);
     // 절 분해 (숫자 안의 콤마는 유지)
-    const clauses = t.split(/,(?!\d)|\n|;|·(?=\s)/).map(s => s.trim()).filter(Boolean);
+    const clauses = t.split(/\n|;|·(?=\s)/).map(s => s.trim()).filter(Boolean);
     let ctxDate = null;
     const trades = [];
     for (const c of clauses) {
