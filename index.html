@@ -1632,7 +1632,7 @@ function LifeRoad() {
       // 수량·단가·수수료
       const sh = c.match(/([\d,]+(?:\.\d+)?)\s*주/);
       if (sh) tr.shares = Number(sh[1].replace(/,/g, ""));
-      const pr = c.match(/(?:체결\s*단가|평균\s*단가|단가|체결가|가격)\s*[:\s]*\$?\s*([\d,]+(?:\.\d+)?)/);
+      const pr = c.match(/(?:주당|체결\s*단가|평균\s*단가|단가|체결가|가격)\s*[:\s]*\$?\s*([\d,]+(?:\.\d+)?)/);
       if (pr) tr.price = Number(pr[1].replace(/,/g, ""));else {
         const w = c.match(/([\d,]+(?:\.\d+)?)\s*원/);
         if (w) tr.price = Number(w[1].replace(/,/g, ""));
@@ -1666,6 +1666,21 @@ function LifeRoad() {
           tr.price = "";
         }
         if (/\$|USD|달러/i.test(c)) tr.currency = "USD";
+      }
+      // 통화 감지 (매매에도 적용): $ / USD / 달러가 있으면 USD
+      if ((tr.type === "buy" || tr.type === "sell") && /\$|USD|달러/i.test(c)) tr.currency = "USD";
+      // 금액 기준 거래: 수량·단가가 없고 'N달러/N원 매수·매도' 형태 → shares=금액, price=1 (예수금·MMF·미국국채)
+      if ((tr.type === "buy" || tr.type === "sell") && !(num(tr.shares) > 0 && num(tr.price) > 0)) {
+        const amtUsd = c.match(/([\d,]+(?:\.\d+)?)\s*(?:달러|\$|USD)/i);
+        const amtWon = c.match(/([\d,]+(?:\.\d+)?)\s*원(?:어치)?/);
+        if (amtUsd) {
+          tr.shares = Number(amtUsd[1].replace(/,/g, ""));
+          tr.price = 1;
+          tr.currency = "USD";
+        } else if (amtWon && !(num(tr.shares) > 0)) {
+          tr.shares = Number(amtWon[1].replace(/,/g, ""));
+          tr.price = 1;
+        }
       }
       // 유효성
       const ok = tr.type === "deposit" || tr.type === "withdraw" ? num(tr.amount) > 0 : tr.name && tr.type && (tr.type === "dividend" ? num(tr.amount) > 0 : num(tr.shares) > 0 && num(tr.price) > 0);
