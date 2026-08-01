@@ -172,6 +172,8 @@ const today = () => new Date().toISOString().slice(0, 10);
 // 예수금 종목명
 const KRW_CASH = "원화예수금";
 const USD_CASH = "달러예수금";
+// 예수금 전환일 — 이 날짜 이후 거래만 현금 잔고에 반영
+const CASH_START = "2026-08-01";
 
 // 이동평균법 — 거래내역에서 종목별 보유수량·평균단가·실현손익·배당 계산
 function computePositions(txns, pricesByName, fx) {
@@ -240,6 +242,7 @@ function computeCash(txns, fx) {
     usd[a] = (usd[a] || 0) + v;
   };
   for (const t of sorted) {
+    if (t.date < CASH_START) continue; // 전환일 이전 거래 제외
     const isCash = t.name === KRW_CASH || t.name === USD_CASH;
     const usdTxn = (t.currency || "KRW") === "USD";
     const qty = num(t.shares),
