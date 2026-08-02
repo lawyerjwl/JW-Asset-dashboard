@@ -1138,7 +1138,8 @@ function LifeRoad() {
     price: "",
     fee: "",
     amount: "",
-    tax: ""
+    tax: "",
+    currency: "KRW"
   });
   const [divMsg, setDivMsg] = useState("");
   const [parsedList, setParsedList] = useState([]);
@@ -1767,15 +1768,16 @@ function LifeRoad() {
       setDivMsg("수량과 단가를 확인하세요.");
       return;
     }
+    const cur = divForm.currency || curOf(divForm.name) || "KRW";
     const base = {
       id: uid(),
       date: divForm.date || today(),
       accountId: divForm.accountId || data.accounts[0]?.id || "",
       name: divForm.name,
-      currency: curOf(divForm.name) || "KRW",
+      currency: cur,
       opening: false
     };
-    const txn = isDiv ? {
+    let txn = isDiv ? {
       ...base,
       type: "dividend",
       shares: 0,
@@ -1788,6 +1790,10 @@ function LifeRoad() {
       price: num(divForm.price),
       fee: num(divForm.fee)
     };
+    if (cur === "USD" && fx > 0) txn = {
+      ...txn,
+      fxRate: fx
+    }; // USD 거래는 오늘 환율 고정
     set({
       transactions: [...data.transactions, txn]
     });
@@ -1802,7 +1808,8 @@ function LifeRoad() {
       price: "",
       fee: "",
       amount: "",
-      tax: ""
+      tax: "",
+      currency: divForm.currency
     });
   };
   const setPrice = (nm, val) => set({
@@ -2682,7 +2689,22 @@ function LifeRoad() {
   }, stockNames.map(n => /*#__PURE__*/React.createElement("option", {
     key: n,
     value: n
-  })))), divForm.type === "dividend" ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("td", {
+  }))), /*#__PURE__*/React.createElement("select", {
+    className: "lr-input",
+    value: divForm.currency,
+    onChange: e => setDivForm({
+      ...divForm,
+      currency: e.target.value
+    }),
+    style: {
+      width: 64,
+      marginTop: 4
+    }
+  }, /*#__PURE__*/React.createElement("option", {
+    value: "KRW"
+  }, "KRW"), /*#__PURE__*/React.createElement("option", {
+    value: "USD"
+  }, "USD"))), divForm.type === "dividend" ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("td", {
     className: "r"
   }, /*#__PURE__*/React.createElement(NumInput, {
     value: divForm.amount,
@@ -2705,7 +2727,7 @@ function LifeRoad() {
     style: {
       color: T.mint
     }
-  }, won(num(divForm.amount) - num(divForm.tax)))) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("td", {
+  }, divForm.currency === "USD" ? `$${(num(divForm.amount) - num(divForm.tax)).toLocaleString()}` : won(num(divForm.amount) - num(divForm.tax)))) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("td", {
     className: "r"
   }, /*#__PURE__*/React.createElement(NumInput, {
     value: divForm.shares,
@@ -2737,7 +2759,7 @@ function LifeRoad() {
     style: {
       color: T.mint
     }
-  }, won(num(divForm.shares) * num(divForm.price)))))))), /*#__PURE__*/React.createElement("div", {
+  }, divForm.currency === "USD" ? `$${(num(divForm.shares) * num(divForm.price)).toLocaleString()}` : won(num(divForm.shares) * num(divForm.price)))))))), /*#__PURE__*/React.createElement("div", {
     className: "lr-mini"
   }, "계좌는 알림의 계좌번호 끝자리로 자동 식별됩니다 — 55 퇴직연금 · 29 IRP · 4801 ISA · 802 미래에셋 개인연금 · 915 삼성 개인연금 · 798 토스증권."), /*#__PURE__*/React.createElement("button", {
     className: "lr-add",
