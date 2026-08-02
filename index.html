@@ -205,8 +205,9 @@ function computePositions(txns, pricesByName, fx) {
   }
   return Object.values(g).map(p => {
     let cp = num(pricesByName[p.name]);
-    // USD 종목인데 현재가 없으면(미국 국채 등) 평단(달러)으로 평가 → 환율 변동만 반영
-    if (p.currency === "USD" && cp <= 0) cp = p.avgCost;
+    // 미국 국채는 자동시세 없음 → 항상 평단(달러)으로 평가 (서버가 원화 시세를 줘도 무시).
+    // 그 외 USD 종목도 현재가 없으면 평단으로.
+    if (p.name === "미국 국채" || p.currency === "USD" && cp <= 0) cp = p.avgCost;
     const conv = p.currency === "USD" ? fx : 1;
     const mv = p.shares * cp;
     const costKRW = p.costKRW > 0 ? p.costKRW : p.avgCost * p.shares * conv;
