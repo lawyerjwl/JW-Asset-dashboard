@@ -2323,12 +2323,30 @@ function LifeRoad() {
   }, "실현손익"), /*#__PURE__*/React.createElement("th", {
     className: "r"
   }, "수익률"))), /*#__PURE__*/React.createElement("tbody", null, data.accounts.map(acc => {
-    const ps = positions.filter(p => p.accountId === acc.id);
+    const stockPs = positions.filter(p => p.accountId === acc.id);
+    // 예수금(원화·달러)도 계좌 현황에 표시 — 평가액만, 손익 없음
+    const cashPs = cashPositions.filter(c => c.accountId === acc.id).map(c => ({
+      name: c.name,
+      accountId: c.accountId,
+      currency: c.currency,
+      shares: c.shares,
+      avgCost: 1,
+      currentPrice: 1,
+      mvKRW: c.mvKRW,
+      unrealizedKRW: 0,
+      realizedKRW: 0,
+      dividendsKRW: 0,
+      realized: 0,
+      dividends: 0,
+      conv: c.conv,
+      isCash: true
+    }));
+    const ps = [...stockPs, ...cashPs];
     if (!ps.length) return null;
     const mv = ps.reduce((s, p) => s + p.mvKRW, 0);
     const ur = ps.reduce((s, p) => s + p.unrealizedKRW, 0);
     const rl = ps.reduce((s, p) => s + p.realizedKRW + p.dividendsKRW, 0);
-    const basis = ps.reduce((s, p) => s + p.avgCost * p.shares * p.conv, 0);
+    const basis = stockPs.reduce((s, p) => s + p.avgCost * p.shares * p.conv, 0);
     const r = basis ? ur / basis * 100 : null;
     return /*#__PURE__*/React.createElement(React.Fragment, {
       key: acc.id
@@ -2338,27 +2356,29 @@ function LifeRoad() {
       colSpan: 8
     }, acc.name, acc.broker ? ` · ${acc.broker}` : "")), ps.map(p => {
       const r2 = p.avgCost && p.shares ? (p.currentPrice - p.avgCost) / p.avgCost * 100 : null;
-      const closed = p.shares <= 0;
+      const closed = p.shares <= 0 && !p.isCash;
       const isBond = p.name === "미국 국채"; // 채권은 평가액·손익만 원화로, 수량·단가는 숨김
+      const hideDetail = isBond || p.isCash;
+      const label = p.name === USD_CASH ? `달러예수금 ($${Math.round(p.shares).toLocaleString()})` : p.name;
       return /*#__PURE__*/React.createElement("tr", {
         key: p.name,
         className: closed ? "closed" : ""
       }, /*#__PURE__*/React.createElement("td", {
         className: "ind"
-      }, p.name, closed ? " (청산)" : ""), /*#__PURE__*/React.createElement("td", {
+      }, label, closed ? " (청산)" : ""), /*#__PURE__*/React.createElement("td", {
         className: "r mono"
-      }, closed || isBond ? "—" : p.shares.toLocaleString()), /*#__PURE__*/React.createElement("td", {
+      }, closed || hideDetail ? "—" : p.shares.toLocaleString()), /*#__PURE__*/React.createElement("td", {
         className: "r mono"
-      }, closed || isBond ? "—" : priceFmt(p.avgCost, p.currency)), /*#__PURE__*/React.createElement("td", {
+      }, closed || hideDetail ? "—" : priceFmt(p.avgCost, p.currency)), /*#__PURE__*/React.createElement("td", {
         className: "r mono"
-      }, closed || isBond ? "—" : priceFmt(p.currentPrice, p.currency)), /*#__PURE__*/React.createElement("td", {
+      }, closed || hideDetail ? "—" : priceFmt(p.currentPrice, p.currency)), /*#__PURE__*/React.createElement("td", {
         className: "r mono"
       }, closed ? "—" : won(p.mvKRW)), /*#__PURE__*/React.createElement("td", {
         className: "r mono",
         style: {
           color: p.unrealizedKRW >= 0 ? T.mint : T.loss
         }
-      }, closed ? "—" : signWon(p.unrealizedKRW)), /*#__PURE__*/React.createElement("td", {
+      }, closed || p.isCash ? "—" : signWon(p.unrealizedKRW)), /*#__PURE__*/React.createElement("td", {
         className: "r mono",
         style: {
           color: p.realizedKRW + p.dividendsKRW >= 0 ? T.mint : T.loss
@@ -2368,7 +2388,7 @@ function LifeRoad() {
         style: {
           color: (r2 || 0) >= 0 ? T.mint : T.loss
         }
-      }, r2 == null || isBond ? "—" : pct(r2)));
+      }, r2 == null || hideDetail ? "—" : pct(r2)));
     }), /*#__PURE__*/React.createElement("tr", {
       className: "sub"
     }, /*#__PURE__*/React.createElement("td", null, "계좌 소계"), /*#__PURE__*/React.createElement("td", null), /*#__PURE__*/React.createElement("td", null), /*#__PURE__*/React.createElement("td", null), /*#__PURE__*/React.createElement("td", {
