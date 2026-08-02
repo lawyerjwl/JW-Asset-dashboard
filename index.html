@@ -1614,8 +1614,8 @@ function LifeRoad() {
       if (m1) ctxDate = `${m1[1]}-${pad(m1[2])}-${pad(m1[3])}`;else if (m2) ctxDate = `${YEAR}-${pad(m2[1])}-${pad(m2[2])}`;else if (/같은\s*날/.test(c) && ctxDate) {/* keep ctxDate */}
       tr.date = ctxDate || today();
       // 구분
-      const hasTrade = /매수|구매|삽니다|매도|판매|팝니다|배당|분배금/.test(c);
-      if (/매수|구매|삽니다/.test(c)) tr.type = "buy";else if (/매도|판매|팝니다/.test(c)) tr.type = "sell";else if (/배당|분배금/.test(c)) tr.type = "dividend";else if (!hasTrade && /입금|이체입금|환입/.test(c)) tr.type = "deposit";else if (!hasTrade && /출금|이체출금|인출/.test(c)) tr.type = "withdraw";
+      const hasTrade = /매수|구매|삽니다|매도|판매|팝니다|배당|분배금|이자/.test(c);
+      if (/매수|구매|삽니다/.test(c)) tr.type = "buy";else if (/매도|판매|팝니다/.test(c)) tr.type = "sell";else if (/배당|분배금|이자/.test(c)) tr.type = "dividend";else if (!hasTrade && /입금|이체입금|환입/.test(c)) tr.type = "deposit";else if (!hasTrade && /출금|이체출금|인출/.test(c)) tr.type = "withdraw";
       // 계좌 (절 안에 끝자리가 따로 있으면 우선)
       const ca = acctBySuffix(c);
       if (ca) tr.accountId = ca;
@@ -1642,11 +1642,12 @@ function LifeRoad() {
       const taxM = c.match(/(?:세금|원천징수|제세금|소득세)[^0-9]{0,12}([0-9][0-9,]{2,})/);
       if (taxM) tr.tax = Number(taxM[1].replace(/,/g, ""));
       if (tr.type === "dividend") {
-        const amtM = c.match(/(?:배당금|배당|분배금|입금액|지급액|금액)[^0-9]{0,12}([0-9][0-9,]{2,})/);
+        const amtM = c.match(/(?:배당금|배당|분배금|이자|입금액|지급액|금액)[^0-9]{0,12}([0-9][0-9,]*(?:\.[0-9]+)?)/) || c.match(/([0-9][0-9,]*(?:\.[0-9]+)?)\s*(?:달러|불|\$|USD)/i) || c.match(/(?:\$|USD)\s*([0-9][0-9,]*(?:\.[0-9]+)?)/i);
         if (amtM) tr.amount = Number(amtM[1].replace(/,/g, ""));else if (tr.price) {
           tr.amount = tr.price;
           tr.price = "";
         }
+        if (/\$|USD|달러|불/i.test(c)) tr.currency = "USD";
       }
       // 입출금 금액 (명시 금액 / 만원·억 / 원)
       if (tr.type === "deposit" || tr.type === "withdraw") {
@@ -2338,6 +2339,7 @@ function LifeRoad() {
     }, acc.name, acc.broker ? ` · ${acc.broker}` : "")), ps.map(p => {
       const r2 = p.avgCost && p.shares ? (p.currentPrice - p.avgCost) / p.avgCost * 100 : null;
       const closed = p.shares <= 0;
+      const isBond = p.name === "미국 국채"; // 채권은 평가액·손익만 원화로, 수량·단가는 숨김
       return /*#__PURE__*/React.createElement("tr", {
         key: p.name,
         className: closed ? "closed" : ""
@@ -2345,11 +2347,11 @@ function LifeRoad() {
         className: "ind"
       }, p.name, closed ? " (청산)" : ""), /*#__PURE__*/React.createElement("td", {
         className: "r mono"
-      }, closed ? "—" : p.shares.toLocaleString()), /*#__PURE__*/React.createElement("td", {
+      }, closed || isBond ? "—" : p.shares.toLocaleString()), /*#__PURE__*/React.createElement("td", {
         className: "r mono"
-      }, closed ? "—" : priceFmt(p.avgCost, p.currency)), /*#__PURE__*/React.createElement("td", {
+      }, closed || isBond ? "—" : priceFmt(p.avgCost, p.currency)), /*#__PURE__*/React.createElement("td", {
         className: "r mono"
-      }, closed ? "—" : priceFmt(p.currentPrice, p.currency)), /*#__PURE__*/React.createElement("td", {
+      }, closed || isBond ? "—" : priceFmt(p.currentPrice, p.currency)), /*#__PURE__*/React.createElement("td", {
         className: "r mono"
       }, closed ? "—" : won(p.mvKRW)), /*#__PURE__*/React.createElement("td", {
         className: "r mono",
@@ -2366,7 +2368,7 @@ function LifeRoad() {
         style: {
           color: (r2 || 0) >= 0 ? T.mint : T.loss
         }
-      }, r2 == null ? "—" : pct(r2)));
+      }, r2 == null || isBond ? "—" : pct(r2)));
     }), /*#__PURE__*/React.createElement("tr", {
       className: "sub"
     }, /*#__PURE__*/React.createElement("td", null, "계좌 소계"), /*#__PURE__*/React.createElement("td", null), /*#__PURE__*/React.createElement("td", null), /*#__PURE__*/React.createElement("td", null), /*#__PURE__*/React.createElement("td", {
