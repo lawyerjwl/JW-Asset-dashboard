@@ -170,41 +170,58 @@ function computePositions(txns, pricesByName, fx) {
       avgCost: 0,
       realized: 0,
       dividends: 0,
-      invested: 0
+      invested: 0,
+      costKRW: 0,
+      realizedKRW: 0,
+      dividendsKRW: 0
     };
     const p = g[key];
     p.currency = t.currency || p.currency;
     const qty = num(t.shares),
       price = num(t.price),
       fee = num(t.fee);
+    const txFx = t.currency === "USD" ? num(t.fxRate) > 0 ? num(t.fxRate) : fx : 1;
     if (t.type === "buy") {
       const add = qty * price + fee;
       p.avgCost = (p.avgCost * p.shares + add) / (p.shares + qty || 1);
       p.shares += qty;
       p.invested += add;
+      p.costKRW += add * txFx;
     } else if (t.type === "sell") {
       const proceeds = qty * price - fee;
       p.realized += proceeds - p.avgCost * qty;
+      const costPerKRW = p.shares > 0 ? p.costKRW / p.shares : 0;
+      p.realizedKRW += (qty * price - fee) * txFx - costPerKRW * qty;
+      p.costKRW -= costPerKRW * qty;
       p.shares = Math.max(0, p.shares - qty);
+      if (p.shares <= 1e-9) {
+        p.shares = 0;
+        p.costKRW = 0;
+      }
     } else if (t.type === "dividend") {
       p.dividends += price - fee;
+      p.dividendsKRW += (price - fee) * txFx;
     }
   }
   return Object.values(g).map(p => {
-    const cp = num(pricesByName[p.name]);
-    const mv = p.shares * cp;
-    const unreal = (cp - p.avgCost) * p.shares;
+    let cp = num(pricesByName[p.name]);
+    // USD 종목인데 현재가 없으면(미국 국채 등) 평단(달러)으로 평가 → 환율 변동만 반영
+    if (p.currency === "USD" && cp <= 0) cp = p.avgCost;
     const conv = p.currency === "USD" ? fx : 1;
+    const mv = p.shares * cp;
+    const costKRW = p.costKRW > 0 ? p.costKRW : p.avgCost * p.shares * conv;
+    const mvKRW = mv * conv;
+    const unrealKRW = mvKRW - costKRW;
     return {
       ...p,
       currentPrice: cp,
       marketValue: mv,
-      unrealized: unreal,
-      mvKRW: mv * conv,
-      unrealizedKRW: unreal * conv,
-      realizedKRW: p.realized * conv,
-      dividendsKRW: p.dividends * conv,
-      investedKRW: p.invested * conv,
+      unrealized: unrealKRW / (conv || 1),
+      mvKRW,
+      unrealizedKRW: unrealKRW,
+      realizedKRW: p.realizedKRW !== 0 ? p.realizedKRW : p.realized * conv,
+      dividendsKRW: p.dividendsKRW > 0 ? p.dividendsKRW : p.dividends * conv,
+      investedKRW: costKRW,
       conv
     };
   });
@@ -1573,7 +1590,7 @@ function LifeRoad() {
     }
     const pad = n => String(n).padStart(2, "0");
     const YEAR = new Date().getFullYear();
-    const ALIAS = [[/미국채\s*혼합|S&P\s*500\s*&\s*10|10\s*BOND/i, "S&P500 & 10 BOND"], [/KODEX\s*200|코스피|KOSPI|069500/i, "KOSPI"]];
+    const ALIAS = [[/미국채\s*혼합|S&P\s*500\s*&\s*10|10\s*BOND/i, "S&P500 & 10 BOND"], [/KODEX\s*200|코스피|KOSPI|069500/i, "KOSPI"], [/미국\s*국채|미국국채|미국\s*단기채|국채/i, "미국 국채"]];
     const namesByLen = [...stockNames].sort((a, b) => String(b).length - String(a).length);
     // 절 분해 (숫자 안의 콤마는 유지)
     const clauses = t.split(/\n|;|·(?=\s)/).map(s => s.trim()).filter(Boolean);
@@ -1645,13 +1662,13 @@ function LifeRoad() {
           tr.amount = tr.price;
           tr.price = "";
         }
-        if (/\$|USD|달러/i.test(c)) tr.currency = "USD";
+        if (/\$|USD|달러|불/i.test(c)) tr.currency = "USD";
       }
       // 통화 감지 (매매에도 적용): $ / USD / 달러가 있으면 USD
-      if ((tr.type === "buy" || tr.type === "sell") && /\$|USD|달러/i.test(c)) tr.currency = "USD";
+      if ((tr.type === "buy" || tr.type === "sell") && /\$|USD|달러|불/i.test(c)) tr.currency = "USD";
       // 금액 기준 거래: 수량·단가가 없고 'N달러/N원 매수·매도' 형태 → shares=금액, price=1 (예수금·MMF·미국국채)
       if ((tr.type === "buy" || tr.type === "sell") && !(num(tr.shares) > 0 && num(tr.price) > 0)) {
-        const amtUsd = c.match(/([\d,]+(?:\.\d+)?)\s*(?:달러|\$|USD)/i);
+        const amtUsd = c.match(/([\d,]+(?:\.\d+)?)\s*(?:달러|불|\$|USD)/i) || c.match(/(?:\$|USD)\s*([\d,]+(?:\.\d+)?)/i);
         const amtWon = c.match(/([\d,]+(?:\.\d+)?)\s*원(?:어치)?/);
         if (amtUsd) {
           tr.shares = Number(amtUsd[1].replace(/,/g, ""));
@@ -1686,9 +1703,13 @@ function LifeRoad() {
   };
   const addAllParsed = () => {
     if (!parsedList.length) return;
+    const stampFx = t => t.currency === "USD" && fx > 0 ? {
+      ...t,
+      fxRate: fx
+    } : t;
     const txns = parsedList.map(f => {
       if (f.type === "deposit" || f.type === "withdraw") {
-        return {
+        return stampFx({
           id: uid(),
           date: f.date || today(),
           accountId: f.accountId || data.accounts[0]?.id || "",
@@ -1699,17 +1720,17 @@ function LifeRoad() {
           fee: 0,
           currency: f.currency === "USD" ? "USD" : "KRW",
           opening: false
-        };
+        });
       }
       const base = {
         id: uid(),
         date: f.date || today(),
         accountId: f.accountId || data.accounts[0]?.id || "",
         name: f.name,
-        currency: curOf(f.name) || "KRW",
+        currency: f.currency === "USD" ? "USD" : curOf(f.name) || "KRW",
         opening: false
       };
-      return f.type === "dividend" ? {
+      return stampFx(f.type === "dividend" ? {
         ...base,
         type: "dividend",
         shares: 0,
@@ -1721,7 +1742,7 @@ function LifeRoad() {
         shares: num(f.shares),
         price: num(f.price),
         fee: num(f.fee)
-      };
+      });
     });
     set({
       transactions: [...data.transactions, ...txns]
