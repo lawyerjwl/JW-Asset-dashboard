@@ -230,6 +230,9 @@ function computePositions(txns, pricesByName, fx) {
 
 // 예수금 잔고 — 앱 Calc.cashPositions와 동일 규칙 (자동환전)
 function computeCash(txns, fx) {
+  // 국내 상장 = 원화 예수금 결제. 그 외 종목(TLT·VOO·미국 국채 등) = 달러 예수금 결제.
+  const DOMESTIC = new Set(["S&P500", "KOSPI", "MMF", "S&P500 & 10 BOND", "우리사주", "BANK", KRW_CASH, USD_CASH]);
+  const usdSettled = t => (t.currency || "KRW") === "USD" || t.name && !DOMESTIC.has(t.name);
   const sorted = [...txns].sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0);
   const krw = {},
     usd = {};
@@ -243,23 +246,29 @@ function computeCash(txns, fx) {
     if (t.date < CASH_START) continue; // 전환일 이전 거래 제외
     const isCash = t.name === KRW_CASH || t.name === USD_CASH;
     const usdTxn = (t.currency || "KRW") === "USD";
+    const settleUsd = usdSettled(t);
+    const dayFx = num(t.fxRate) > 0 ? num(t.fxRate) : fx; // 그날 환율
     const qty = num(t.shares),
       price = num(t.price),
       fee = num(t.fee);
     if (t.type === "buy" && !isCash) {
       const gross = qty * price + fee;
       if (usdTxn) {
+        // 달러 표시 매수: 달러 잔고 우선 → 부족분 원화 환전
         const have = usd[t.accountId] || 0;
         const useUsd = Math.min(have, gross);
         if (useUsd > 0) uAdd(t.accountId, -useUsd);
         const rest = gross - useUsd;
         if (rest > 0) kAdd(t.accountId, -(rest * fx));
-      } else kAdd(t.accountId, -gross);
+      } else if (settleUsd) {
+        // 원화로 입력된 미국 주식(TLT·VOO): 원화금액 ÷ 그날환율 → 달러예수금 차감
+        uAdd(t.accountId, dayFx > 0 ? -(gross / dayFx) : 0);
+      } else kAdd(t.accountId, -gross); // 국내 종목: 원화 예수금 차감
     } else if (t.type === "sell" && !isCash) {
       const net = qty * price - fee;
-      if (usdTxn) uAdd(t.accountId, net);else kAdd(t.accountId, net);
+      if (usdTxn) uAdd(t.accountId, net);else if (settleUsd) uAdd(t.accountId, dayFx > 0 ? net / dayFx : 0);else kAdd(t.accountId, net);
     } else if (t.type === "dividend") {
-      if (usdTxn) uAdd(t.accountId, price - fee);else kAdd(t.accountId, price - fee);
+      if (usdTxn) uAdd(t.accountId, price - fee);else if (settleUsd) uAdd(t.accountId, dayFx > 0 ? (price - fee) / dayFx : 0);else kAdd(t.accountId, price - fee);
     } else if (t.type === "deposit") {
       if (usdTxn) uAdd(t.accountId, price);else kAdd(t.accountId, price);
     } else if (t.type === "withdraw") {
@@ -1706,7 +1715,9 @@ function LifeRoad() {
   };
   const addAllParsed = () => {
     if (!parsedList.length) return;
-    const stampFx = t => t.currency === "USD" && fx > 0 ? {
+    const DOMESTIC_SET = new Set(["S&P500", "KOSPI", "MMF", "S&P500 & 10 BOND", "우리사주", "BANK"]);
+    const usdSettleName = t => t.currency === "USD" || t.name && !DOMESTIC_SET.has(t.name);
+    const stampFx = t => usdSettleName(t) && fx > 0 ? {
       ...t,
       fxRate: fx
     } : t;
@@ -1791,10 +1802,12 @@ function LifeRoad() {
       price: num(divForm.price),
       fee: num(divForm.fee)
     };
-    if (cur === "USD" && fx > 0) txn = {
+    const DOMESTIC_M = new Set(["S&P500", "KOSPI", "MMF", "S&P500 & 10 BOND", "우리사주", "BANK"]);
+    const usdSettleM = cur === "USD" || divForm.name && !DOMESTIC_M.has(divForm.name);
+    if (usdSettleM && fx > 0) txn = {
       ...txn,
       fxRate: fx
-    }; // USD 거래는 오늘 환율 고정
+    }; // 달러 결제 종목은 오늘 환율 고정
     set({
       transactions: [...data.transactions, txn]
     });
